@@ -55,7 +55,7 @@ elif [ $CMD == "create-lmdb-dataset" ]; then
     mkdir -p $FOLDERNAME
 
     if [ $DATASET == "celeba_hq" ]; then
-        URL="https://docs.google.com/uc?export=download&id=1_4Cxd7uH8Zqlutu5zUNJfVpgljqh7Olf"
+        URL="https://docs.google.com/uc?export=download&id=1_4Cxd7uH8Zqlutu5zUNJfVpgljqh7Olf" # GT_labels
         wget -r --no-check-certificate $URL -O $FOLDERNAME/GT_labels.zip
         unzip $FOLDERNAME/GT_labels.zip -d $FOLDERNAME
         rm $FOLDERNAME/GT_labels.zip

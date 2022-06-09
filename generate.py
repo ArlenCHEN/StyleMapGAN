@@ -32,6 +32,8 @@ from PIL import Image
 from itertools import combinations
 from training.model import Generator, Encoder
 
+import matplotlib.pyplot as plt
+
 random.seed(0)
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
@@ -191,6 +193,8 @@ class Model(nn.Module):
 
 if __name__ == "__main__":
     device = "cuda"
+    device_num = 6 # Specify the gpu id
+    torch.cuda.set_device(device_num)
 
     parser = argparse.ArgumentParser()
 
@@ -635,6 +639,10 @@ if __name__ == "__main__":
                 elif args.mixing_type == "local_editing":
                     src_img = real_imgs[index1]
                     ref_img = real_imgs[index2]
+                    
+                    print('Before')
+                    print('local editing, src_img shape: ', src_img.shape)
+                    print('local editing, ref img shape: ', ref_img.shape)
 
                     if dataset_name == "celeba_hq":
                         mask1_logit = masks[index1]
@@ -651,8 +659,9 @@ if __name__ == "__main__":
                             mask1[(mask1_logit == label_i) == True] = 1
                             mask2[(mask2_logit == label_i) == True] = 1
 
-                        mask = mask1 + mask2
+                        mask = mask1 + mask2 # Obtain a union of mask1 and mask2
                         mask = mask.float()
+
                     elif dataset_name == "afhq":
                         mask = masks[index1]
 
