@@ -662,11 +662,47 @@ if __name__ == "__main__":
                         mask = mask1 + mask2 # Obtain a union of mask1 and mask2
                         mask = mask.float()
 
+                        is_own_data = True
+                        if is_own_data:
+                            src_img_path = '/home/uss00067/Datasets/FDC/video_001/angry/level_1/024/000/ref_000.jpg'
+                            ref_img_path = '/home/uss00067/Datasets/FDC/video_001/angry/level_1/024/000/3/overlaid.jpg'
+                            mask_path = '/home/uss00067/Datasets/FDC/video_001/angry/level_1/024/000/3/mask.npy'
+                            src_img = Image.open(src_img_path)
+                            src_img = transform(src_img)
+                            src_img_tensor = torch.tensor(src_img).to(device)
+                            src_img_batch = src_img_tensor.unsqueeze(0)
+                            src_img_latent = model(src_img_batch, 'projection')
+
+                            ref_img = Image.open(ref_img_path)
+                            ref_img = transform(ref_img)
+                            ref_img_tensor = torch.tensor(ref_img).to(device)
+                            ref_img_batch = ref_img_tensor.unsqueeze(0)
+                            ref_img_latent = model(ref_img_batch, 'projection')
+
+                            mask_np = np.load(mask_path)
+                            print('Mask shape: ', mask_np.shape)
+                            mask_tensor = torch.tensor(mask_np).to(device)
+
                     elif dataset_name == "afhq":
                         mask = masks[index1]
 
+                    if is_own_data:
+                        latent1 = src_img_latent.squeeze()
+                        latent2 = ref_img_latent.squeeze()
+                        mask = mask_tensor
+                    else:
+                        latent1 = total_latents[index1]
+                        latent2 = total_latents[index2]
+                        mask = mask
+
+                    print('Inputs to the model: ')
+                    print(latent1.shape)
+                    print(latent2.shape)
+                    print(mask.shape)
+                    input()
+
                     mixed_image, recon_img_src, recon_img_ref = model(
-                        (total_latents[index1], total_latents[index2], mask),
+                        (latent1, latent2, mask),
                         "local_editing",
                     )
 

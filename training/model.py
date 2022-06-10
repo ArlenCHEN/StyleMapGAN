@@ -1004,6 +1004,9 @@ class Decoder(nn.Module):
                 # print(mask)
                 mask_for_latent = nn.MaxPool2d(kernel_size=ratio, stride=ratio)(mask)
                 mask_for_latent = mask_for_latent.unsqueeze(1).repeat(1, C, 1, 1)
+                print('In model.py, mask_for_latent: ', mask_for_latent.shape)
+                print('In model.py, style_codes2: ', style_codes2[i].shape)
+                print('In model.py, style_codes1: ', style_codes1[i].shape)
                 style_codes2[i] = torch.where(
                     mask_for_latent > -1, style_codes2[i], style_codes1[i]
                 )
