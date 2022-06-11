@@ -991,6 +991,8 @@ class Decoder(nn.Module):
             style_code2 = style_code[1]
             style_codes1 = []
             style_codes2 = []
+            # print('111In model.py, style_code1: ', style_code1.shape)
+            # print('222In model.py, style_code2" ', style_code2.shape)
 
             for up_layer in self.convs_latent:
                 style_code1 = up_layer(style_code1)
@@ -1000,13 +1002,19 @@ class Decoder(nn.Module):
 
             for i in range(0, len(style_codes2)):
                 _, C, H, W = style_codes2[i].shape
-                ratio = self.size // H
-                # print(mask)
+                # ratio = self.size // H # self.size is come from the loaded args of the pretrained checkpoint
+                mask_size = mask.shape[1]
+                ratio = mask_size // H
+
+                # print('In model.py, mask: ', mask.shape)
+                # print('In model.py, size: ', mask_size)
+                # print('In model.pt, H: ', H)
+                # print('In model.py, ratio: ', ratio)
                 mask_for_latent = nn.MaxPool2d(kernel_size=ratio, stride=ratio)(mask)
                 mask_for_latent = mask_for_latent.unsqueeze(1).repeat(1, C, 1, 1)
-                print('In model.py, mask_for_latent: ', mask_for_latent.shape)
-                print('In model.py, style_codes2: ', style_codes2[i].shape)
-                print('In model.py, style_codes1: ', style_codes1[i].shape)
+                # print('In model.py, mask_for_latent: ', mask_for_latent.shape)
+                # print('In model.py, style_codes2: ', style_codes2[i].shape)
+                # print('In model.py, style_codes1: ', style_codes1[i].shape)
                 style_codes2[i] = torch.where(
                     mask_for_latent > -1, style_codes2[i], style_codes1[i]
                 )
@@ -1113,6 +1121,10 @@ class Generator(nn.Module):
                 )
             )
         self.mapping_z = nn.Sequential(*layers)
+        
+        # is_own_data = True
+        # if is_own_data:
+        #     size = 512
 
         self.decoder = Decoder(
             size,
@@ -1154,7 +1166,6 @@ class Generator(nn.Module):
                 )
 
             image = self.decoder(stylecode, mix_space=mix_space, mask=mask)
-
             if return_stylecode == True:
                 return image, stylecode
             else:

@@ -257,6 +257,7 @@ if __name__ == "__main__":
     batch = args.batch
 
     device = "cuda"
+    # "transform"
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
@@ -663,24 +664,94 @@ if __name__ == "__main__":
                         mask = mask.float()
 
                         is_own_data = True
+                        is_celeb = False
+                        is_crop = False
+                        own_data_size = 256
+                        new_size = (own_data_size, own_data_size)
                         if is_own_data:
-                            src_img_path = '/home/uss00067/Datasets/FDC/video_001/angry/level_1/024/000/ref_000.jpg'
-                            ref_img_path = '/home/uss00067/Datasets/FDC/video_001/angry/level_1/024/000/3/overlaid.jpg'
-                            mask_path = '/home/uss00067/Datasets/FDC/video_001/angry/level_1/024/000/3/mask.npy'
+                            if is_celeb:
+                                src_img_path = '/home/uss00067/Softwares/StyleMapGAN/expr/local_editing/celeba_hq/nose/source_image/0.png'
+                                ref_img_path = '/home/uss00067/Softwares/StyleMapGAN/expr/local_editing/celeba_hq/nose/reference_image/83.png'
+                                # ref_img_path = '/home/uss00067/Softwares/StyleMapGAN/expr/local_editing/celeba_hq/nose/source_image/0.png'
+                                # ref_img_path = '/home/uss00067/Datasets/FDC/video_001/angry/level_1/024/000/3/ref_000.jpeg' # FDC
+                            else:
+                                # src_img_path = '/home/uss00067/Datasets/00000/00012.png'
+                                # ref_img_path = '/home/uss00067/Datasets/00000/00015.png'
+                                
+                                # src_img_path = '/home/uss00067/Datasets/MEAD_Frames/video_001/front/happy/level_2/001/000.jpg'
+                                # ref_img_path = '/home/uss00067/Datasets/MEAD_Frames/video_001/front/happy/level_2/001/080.jpg'
+
+                                # src_img_path = '/home/uss00067/Datasets/FDC/video_001/angry/level_1/024/000/3/ref_000.png'
+                                # # ref_img_path = '/home/uss00067/Datasets/FDC/video_001/angry/level_1/024/000/3/overlaid_5.jpeg'
+                                # ref_img_path = '/home/uss00067/Datasets/FDC/video_001/angry/level_1/024/000/3/ref_000.png'
+
+                                src_img_path = '/home/uss00067/Datasets/face_img1.png'
+                                ref_img_path = '/home/uss00067/Datasets/face_img1.png'
+
+                            mask_path = '/home/uss00067/Datasets/FDC/video_001/angry/level_1/024/000/3/mask_4.npy'
+
                             src_img = Image.open(src_img_path)
+                            src_img = src_img.convert('RGB')
+
+                            print('In generate, src img: ', src_img)
+
+                            extre_src = src_img.getextrema()
+                            print('extre_src: ', extre_src)
+
+                            src_img = src_img.resize(new_size, resample=Image.BILINEAR)
+                            src_img_np = np.asarray(src_img)
+                            print('src img before transform: ', src_img_np)
+
+                            if is_crop:
+                                margin_size = 64
+                                full_size = int(src_img_np.shape[0])
+                                far_end_size = full_size - margin_size
+                                crop_size = (margin_size, margin_size, far_end_size, far_end_size)
+                                new_src_img = src_img.crop(crop_size)
+                                src_img = new_src_img.resize(new_size, resample=Image.BILINEAR)
+
                             src_img = transform(src_img)
+
+                            print('src img after transform: ', src_img)
+
                             src_img_tensor = torch.tensor(src_img).to(device)
                             src_img_batch = src_img_tensor.unsqueeze(0)
+                            print('In generate, src_img data type: ', src_img_batch.dtype)
+                            print('In generate, max value in src_img: ', torch.max(src_img))
+                            print('In generate, min value in src_img: ', torch.min(src_img))
+
                             src_img_latent = model(src_img_batch, 'projection')
 
                             ref_img = Image.open(ref_img_path)
+                            ref_img = ref_img.convert('RGB')
+                            
+                            print('In generate, ref img: ', ref_img)
+
+                            extre_ref = ref_img.getextrema()
+                            print('In generate, extre_ref: ', extre_ref)
+
+                            ref_img = ref_img.resize(new_size, resample=Image.BILINEAR)
+                            
+                            if is_crop:
+                                new_ref_img = ref_img.crop(crop_size)
+                                ref_img = new_ref_img.resize(new_size, resample=Image.BILINEAR)
+
                             ref_img = transform(ref_img)
                             ref_img_tensor = torch.tensor(ref_img).to(device)
                             ref_img_batch = ref_img_tensor.unsqueeze(0)
+                            print('In generate, ref_img data type: ', ref_img_batch.dtype)
+                            print('In generate, max value in ref_img: ', torch.max(ref_img))
+                            print('In generate, min value in ref_img: ', torch.min(ref_img))
+
                             ref_img_latent = model(ref_img_batch, 'projection')
 
                             mask_np = np.load(mask_path)
-                            print('Mask shape: ', mask_np.shape)
+                            mask_np[mask_np==-1.0] = 0.0 # Negative values have to be changed before interpolation. The value has to be properly selected.
+
+                            mask_im = Image.fromarray(np.uint8(mask_np*255), 'L') # Values have to be converted to 255-like before sent to the fromarray function
+                            mask_im = mask_im.resize(new_size, Image.BILINEAR)
+                            mask_np = np.array(mask_im).astype(float)/255. # Datatype has to be consistent to the previous one. The value has to be restored to [0, 1]
+                            mask_np[mask_np==0.0] = -1.0 # 0 has to be changed to -1.
                             mask_tensor = torch.tensor(mask_np).to(device)
 
                     elif dataset_name == "afhq":
@@ -699,12 +770,44 @@ if __name__ == "__main__":
                     print(latent1.shape)
                     print(latent2.shape)
                     print(mask.shape)
-                    input()
 
                     mixed_image, recon_img_src, recon_img_ref = model(
                         (latent1, latent2, mask),
                         "local_editing",
                     )
+
+                    print('Output shape: ', mixed_image.shape)
+                    print('Output image data type: ', mixed_image.dtype)
+                    print('Max output: ', torch.max(mixed_image))
+                    print('Min output: ', torch.min(mixed_image))
+                    print('Output image: ', mixed_image)
+
+                    mask[mask < -1] = -1
+                    mask[mask > -1] = 1
+
+                    if is_celeb:
+                        mixed_path = "/home/uss00067/Softwares/StyleMapGAN/expr/local_editing/own_data/output_celeba.png"
+                        ref_path = "/home/uss00067/Softwares/StyleMapGAN/expr/local_editing/own_data/ref_img_celeba.png"
+                        src_path = "/home/uss00067/Softwares/StyleMapGAN/expr/local_editing/own_data/src_img_celeba.png"
+                    else:
+                        mixed_path = "/home/uss00067/Softwares/StyleMapGAN/expr/local_editing/own_data/output_fdc.png"
+                        ref_path = "/home/uss00067/Softwares/StyleMapGAN/expr/local_editing/own_data/ref_img_fdc.png"
+                        src_path = "/home/uss00067/Softwares/StyleMapGAN/expr/local_editing/own_data/src_img_fdc.png"
+
+                    mask_path = "/home/uss00067/Softwares/StyleMapGAN/expr/local_editing/own_data/mask_4.png"
+
+                    save_images([mixed_image[0],
+                                 ref_img,
+                                 src_img,
+                                 mask], 
+                                 [mixed_path,
+                                  ref_path,
+                                  src_path,
+                                  mask_path],
+                                  )
+
+                    print('Output is saved.')
+                    input()
 
                     save_images(
                         [

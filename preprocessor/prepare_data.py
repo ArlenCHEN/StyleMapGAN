@@ -15,10 +15,20 @@ from torchvision.transforms import functional as trans_fn
 
 
 def resize_and_convert(img, size, resample, quality=100):
+    print('img1: ', img)
+    print('In prepare data, img shape: ', img.size)
+    print('resample: ', resample)
     img = trans_fn.resize(img, (size, size), resample)
+    print('img2: ', img)
+    
+    print('quality: ', quality)
+    input()
     # img = trans_fn.center_crop(img, size)
     buffer = BytesIO()
     img.save(buffer, format="jpeg", quality=quality)
+
+    print('buffer: ', buffer)
+
     val = buffer.getvalue()
 
     return val
