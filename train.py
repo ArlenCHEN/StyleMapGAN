@@ -31,14 +31,13 @@ from copy import deepcopy
 
 torch.backends.cudnn.benchmark = True
 
-def image_grid(array, ncols=4):
+def image_grid(array, ncols=8):
     index, height, width, channels = array.shape
-    nrows = index//ncols
-    
+    nrows = index//ncols    
     img_grid = (array.reshape(nrows, ncols, height, width, channels)
               .swapaxes(1,2)
               .reshape(height*nrows, width*ncols))
-    
+        
     return img_grid
 
 def tensor2image(im_tensor):
@@ -379,9 +378,9 @@ def ddp_main(rank, world_size, args):
     epoch = -1
     gpu_group = dist.new_group(list(range(args.ngpus)))
 
-    is_debugging = True
+    is_debugging = False
     is_tensorboard = True
-    os.makedirs(args.tensorboard_logdir, exist_ok=True)
+    os.makedirs(args.tensorboard_logdir, exist_ok=True) # To avoid the file exists error
     writer = SummaryWriter(log_dir=args.tensorboard_logdir)
 
     for i in pbar:
@@ -407,16 +406,22 @@ def ddp_main(rank, world_size, args):
             print('z stylecode: ', stylecode.shape)
         
         if is_tensorboard:
-            temp_real_img = deepcopy(real_img)
+            # temp_real_img = deepcopy(real_img)
+            temp_real_img = real_img.detach()
             vis_real_img = tensor2image(temp_real_img)
+            vis_real_img = (vis_real_img+1)/2.
 
-            temp_fake_img = deepcopy(fake_img)
+            # temp_fake_img = deepcopy(fake_img)
+            temp_fake_img = fake_img.detach()
             vis_fake_img = tensor2image(temp_fake_img)
-            
-            temp_fake_stylecode = deepcopy(fake_stylecode)
+            vis_fake_img = (vis_fake_img+1)/2.
+
+            # temp_fake_stylecode = deepcopy(fake_stylecode)
+            temp_fake_stylecode = fake_stylecode.detach()
             vis_fake_stylecode = tensor2image(temp_fake_stylecode)
 
-            temp_z_stylecode = deepcopy(stylecode)
+            # temp_z_stylecode = deepcopy(stylecode)
+            temp_z_stylecode = stylecode.detach()
             vis_z_stylecode = tensor2image(temp_z_stylecode)
 
         adv_loss = adv_loss.mean()
@@ -514,7 +519,8 @@ def ddp_main(rank, world_size, args):
             print('indomainGAN_E_loss_val: ', indomainGAN_E_loss_val)
 
         if is_tensorboard:
-            temp_real_stylecode = deepcopy(real_stylecode)
+            # temp_real_stylecode = deepcopy(real_stylecode)
+            temp_real_stylecode = real_stylecode.detach()
             vis_real_stylecode = tensor2image(temp_real_stylecode)
 
         e_optim.zero_grad()
@@ -543,6 +549,7 @@ def ddp_main(rank, world_size, args):
         
         if is_tensorboard:
             # Log losses and images to tensorboard
+            print('Writing losses to tensorboard...')
             writer.add_scalar('train/adv_loss', adv_loss_val, i)
             writer.add_scalar('train/w_rec_loss', w_rec_loss_val, i)
             writer.add_scalar('train/indomaingan_d_loss', indomainGAN_D_loss_val, i)
@@ -555,53 +562,65 @@ def ddp_main(rank, world_size, args):
             writer.add_scalar('train/x_rec_loss', x_rec_loss_val, i)
             writer.add_scalar('train/perceptual_loss', perceptual_loss_val, i)
             
-            nrow = 2
-            ncol = 3
-            fig = plt.figure(figsize=(30, 10))
-            gs = gridspec.GridSpec(nrow, ncol,
-                                            wspace=0.1, hspace=0.0, 
-                                            top=1.-0.5/(nrow+1), bottom=0.5/(nrow+1), 
-                                            left=0.5/(ncol+1), right=1-0.5/(ncol+1))
-            ax1 = plt.subplot(gs[0, 0])
-            ax1.imshow(vis_real_img)
-            ax1.set_xticklabels([])
-            ax1.set_yticklabels([])
-            ax1.axis('off')
+            # Log images with a smaller frequency
+            log_imgs_every = 5
+            if i%log_imgs_every == 0:
+                print('max of vis_fake_img: ', np.max(vis_fake_img))
+                print('min of vis_fake_img: ', np.min(vis_fake_img))
 
-            ax2 = plt.subplot(gs[0, 1])
-            ax2.imshow(vis_fake_img)
-            ax2.set_xticklabels([])
-            ax2.set_yticklabels([])
-            ax2.axis('off')
+                nrow = 2
+                ncol = 3
+                fig = plt.figure(figsize=(12, 10))
+                gs = gridspec.GridSpec(nrow, ncol,
+                                                wspace=0.1, hspace=0.0, 
+                                                top=1.-0.5/(nrow+1), bottom=0.5/(nrow+1), 
+                                                left=0.5/(ncol+1), right=1-0.5/(ncol+1))
+                ax1 = plt.subplot(gs[0, 0])
+                ax1.imshow(vis_real_img)
+                ax1.title.set_text('Real Image')
+                ax1.set_xticklabels([])
+                ax1.set_yticklabels([])
+                ax1.axis('off')
 
-            ax4 = plt.subplot(gs[1, 0])
-            im4 = ax4.imshow(vis_z_stylecode)
-            divider = make_axes_locatable(ax4)
-            cax = divider.append_axes('right', size='5%', pad=0.05)
-            fig.colorbar(im4, cax=cax, orientation='vertical')
-            ax4.set_xticklabels([])
-            ax4.set_yticklabels([])
-            ax4.axis('off')
+                ax2 = plt.subplot(gs[0, 1])
+                ax2.imshow(vis_fake_img)
+                ax2.title.set_text('Fake Image')
+                ax2.set_xticklabels([])
+                ax2.set_yticklabels([])
+                ax2.axis('off')
 
-            ax5 = plt.subplot(gs[1, 1])
-            im5 = ax5.imshow(vis_real_stylecode)
-            divider = make_axes_locatable(ax5)
-            cax = divider.append_axes('right', size='5%', pad=0.05)
-            fig.colorbar(im5, cax=cax, orientation='vertical')
-            ax5.set_xticklabels([])
-            ax5.set_yticklabels([])
-            ax5.axis('off')
+                ax4 = plt.subplot(gs[1, 0])
+                im4 = ax4.imshow(vis_z_stylecode)
+                divider = make_axes_locatable(ax4)
+                cax = divider.append_axes('right', size='5%', pad=0.05)
+                fig.colorbar(im4, cax=cax, orientation='vertical')
+                ax4.title.set_text('z Stylecode (from F)')
+                ax4.set_xticklabels([])
+                ax4.set_yticklabels([])
+                ax4.axis('off')
 
-            ax6 = plt.subplot(gs[1, 2])
-            im6 = ax6.imshow(vis_fake_stylecode)
-            divider = make_axes_locatable(ax6)
-            cax = divider.append_axes('right', size='5%', pad=0.05)
-            fig.colorbar(im6, cax=cax, orientation='vertical')
-            ax6.set_xticklabels([])
-            ax6.set_yticklabels([])
-            ax6.axis('off')
+                ax5 = plt.subplot(gs[1, 1])
+                im5 = ax5.imshow(vis_real_stylecode)
+                divider = make_axes_locatable(ax5)
+                cax = divider.append_axes('right', size='5%', pad=0.05)
+                fig.colorbar(im5, cax=cax, orientation='vertical')
+                ax5.title.set_text('Real Stylecode (from E)')
+                ax5.set_xticklabels([])
+                ax5.set_yticklabels([])
+                ax5.axis('off')
 
-            writer.add_figure('train_figs'+str(i), fig)
+                ax6 = plt.subplot(gs[1, 2])
+                im6 = ax6.imshow(vis_fake_stylecode)
+                divider = make_axes_locatable(ax6)
+                cax = divider.append_axes('right', size='5%', pad=0.05)
+                fig.colorbar(im6, cax=cax, orientation='vertical')
+                ax6.title.set_text('Fake Stylecode (from E)')
+                ax6.set_xticklabels([])
+                ax6.set_yticklabels([])
+                ax6.axis('off')
+                
+                print('Writing images to tensorboard...')
+                writer.add_figure('train_figs'+str(i), fig)
 
         # Validation
         with torch.no_grad():
@@ -689,7 +708,7 @@ if __name__ == "__main__":
     parser.add_argument("--iter", type=int, default=5000) # 5000 training iters in total
     parser.add_argument("--save_network_interval", type=int, default=50) # Save the checkpoint every 50 iters
     parser.add_argument("--small_generator", action="store_true")
-    parser.add_argument("--batch", type=int, default=16, help="total batch sizes")
+    parser.add_argument("--batch", type=int, default=8, help="total batch sizes")
     parser.add_argument("--size", type=int, choices=[128, 256, 512, 1024], default=256)
     parser.add_argument("--r1", type=float, default=10)
     parser.add_argument("--d_reg_every", type=int, default=16)

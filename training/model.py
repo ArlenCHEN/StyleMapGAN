@@ -1166,6 +1166,7 @@ class Generator(nn.Module):
                 )
 
             image = self.decoder(stylecode, mix_space=mix_space, mask=mask)
+            
             if return_stylecode == True:
                 return image, stylecode
             else:
