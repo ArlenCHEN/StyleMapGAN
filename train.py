@@ -22,9 +22,40 @@ from training import lpips
 from training.model import Generator, Discriminator, Encoder
 from training.dataset_ddp import MultiResolutionDataset
 from tqdm import tqdm
+from tensorboardX import SummaryWriter
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import gridspec
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from copy import deepcopy
 
 torch.backends.cudnn.benchmark = True
 
+def image_grid(array, ncols=4):
+    index, height, width, channels = array.shape
+    nrows = index//ncols
+    
+    img_grid = (array.reshape(nrows, ncols, height, width, channels)
+              .swapaxes(1,2)
+              .reshape(height*nrows, width*ncols))
+    
+    return img_grid
+
+def tensor2image(im_tensor):
+    '''
+    Input tensor is a detached tensor
+    '''
+    im_np = im_tensor.data[0].cpu().numpy()
+    channel, _, _ = im_np.shape
+    if channel == 3:
+        new_im_np = np.transpose(im_np, (1,2,0))
+    elif channel == 64:
+        new_im_np = im_np[..., np.newaxis]
+        new_im_np = image_grid(new_im_np)
+    else:
+        raise NotImplementedError(f'Not yet supported for channel {channel}')
+    
+    return new_im_np
 
 def setup(rank, world_size):
     os.environ["MASTER_ADDR"] = "localhost"
@@ -165,7 +196,7 @@ class DDPModel(nn.Module):
             fake_stylecode = self.encoder(fake_img)
             w_rec_loss = self.mse_loss(stylecode, fake_stylecode)
 
-            return adv_loss, w_rec_loss, stylecode
+            return adv_loss, w_rec_loss, stylecode, fake_stylecode, fake_img
 
         elif mode == "D":
             with torch.no_grad():
@@ -211,7 +242,8 @@ class DDPModel(nn.Module):
             fake_pred_from_E = self.discriminator(fake_img)
             indomainGAN_E_loss = F.softplus(-fake_pred_from_E).mean()
 
-            return x_rec_loss, perceptual_loss, indomainGAN_E_loss
+            real_stylecode = fake_stylecode
+            return x_rec_loss, perceptual_loss, indomainGAN_E_loss, real_stylecode
 
         elif mode == "cal_mse_lpips":
             fake_stylecode = self.e_ema(real_img)
@@ -228,11 +260,13 @@ def run(ddp_fn, world_size, args):
 
 
 def ddp_main(rank, world_size, args):
-    print(f"Running DDP model on rank {rank}.")
+    print(f"Running DDP model on rank {rank}.")    
     setup(rank, world_size)
     map_location = f"cuda:{rank}"
-    torch.cuda.set_device(map_location)
 
+    torch.cuda.set_device(map_location)
+    
+    # This condition being true means the training is resumed
     if args.ckpt:  # ignore current arguments
         ckpt = torch.load(args.ckpt, map_location=map_location)
         train_args = ckpt["train_args"]
@@ -345,6 +379,11 @@ def ddp_main(rank, world_size, args):
     epoch = -1
     gpu_group = dist.new_group(list(range(args.ngpus)))
 
+    is_debugging = True
+    is_tensorboard = True
+    os.makedirs(args.tensorboard_logdir, exist_ok=True)
+    writer = SummaryWriter(log_dir=args.tensorboard_logdir)
+
     for i in pbar:
         if i > args.iter:
             print("Done!")
@@ -358,7 +397,28 @@ def ddp_main(rank, world_size, args):
         real_img = next(train_loader)
         real_img = real_img.to(map_location)
 
-        adv_loss, w_rec_loss, stylecode = model(None, "G")
+        # Here stylecode is from noise z; fake_stylecode is from encoder
+        adv_loss, w_rec_loss, stylecode, fake_stylecode, fake_img = model(None, "G")
+
+        if is_debugging:
+            print('real img: ', real_img.shape)
+            print('fake_img: ', fake_img.shape)
+            print('fake stylecode: ', fake_stylecode.shape)
+            print('z stylecode: ', stylecode.shape)
+        
+        if is_tensorboard:
+            temp_real_img = deepcopy(real_img)
+            vis_real_img = tensor2image(temp_real_img)
+
+            temp_fake_img = deepcopy(fake_img)
+            vis_fake_img = tensor2image(temp_fake_img)
+            
+            temp_fake_stylecode = deepcopy(fake_stylecode)
+            vis_fake_stylecode = tensor2image(temp_fake_stylecode)
+
+            temp_z_stylecode = deepcopy(stylecode)
+            vis_z_stylecode = tensor2image(temp_z_stylecode)
+
         adv_loss = adv_loss.mean()
 
         with torch.no_grad():
@@ -370,6 +430,9 @@ def ddp_main(rank, world_size, args):
         g_loss_val = g_loss.item()
         adv_loss_val = adv_loss.item()
 
+        if is_debugging:
+            print('adv_loss_val: ', adv_loss_val)
+
         g_optim.zero_grad()
         g_loss.backward()
         gather_grad(
@@ -379,6 +442,10 @@ def ddp_main(rank, world_size, args):
 
         w_rec_loss = w_rec_loss.mean()
         w_rec_loss_val = w_rec_loss.item()
+
+        if is_debugging:
+            print('w_rec_loss_val: ', w_rec_loss_val)
+
         e_optim.zero_grad()
         (w_rec_loss * args.lambda_w_rec_loss).backward()
         e_optim.step()
@@ -390,7 +457,13 @@ def ddp_main(rank, world_size, args):
         indomainGAN_D_loss = indomainGAN_D_loss.mean()
         indomainGAN_D_loss_val = indomainGAN_D_loss.item()
 
+        if is_debugging:
+            print('indomainGAN_D_loss_val: ', indomainGAN_D_loss_val)
+
         d_loss_val = d_loss.item()
+
+        if is_debugging:
+            print('d_loss_val: ', d_loss_val)
 
         d_optim.zero_grad()
 
@@ -403,20 +476,29 @@ def ddp_main(rank, world_size, args):
         real_score_val = real_score.mean().item()
         fake_score_val = fake_score.mean().item()
 
+        if is_debugging:
+            print('real_score_val: ', real_score_val)
+            print('fake_score_val: ', fake_score_val)
+
         # D reg
         d_regularize = i % args.d_reg_every == 0
         if d_regularize:
             d_reg_loss, r1_loss = model(real_img, "D_reg")
             d_reg_loss = d_reg_loss.mean()
+            d_reg_loss_val = d_reg_loss.item()
+            
             d_optim.zero_grad()
             d_reg_loss.backward()
             d_optim.step()
             r1_val = r1_loss.mean().item()
+            if is_debugging:
+                print('d_reg_loss_val: ', d_reg_loss_val)
+                print('r1_val: ', r1_val)
 
         requires_grad(model.module.discriminator, False)
 
         # E_x_rec
-        x_rec_loss, perceptual_loss, indomainGAN_E_loss = model(real_img, "E_x_rec")
+        x_rec_loss, perceptual_loss, indomainGAN_E_loss, real_stylecode = model(real_img, "E_x_rec")
         x_rec_loss = x_rec_loss.mean()
         perceptual_loss = perceptual_loss.mean()
 
@@ -426,6 +508,14 @@ def ddp_main(rank, world_size, args):
         else:
             indomainGAN_E_loss = 0
             indomainGAN_E_loss_val = 0
+
+        if is_debugging:
+            print('real_stylecode: ', real_stylecode.shape)
+            print('indomainGAN_E_loss_val: ', indomainGAN_E_loss_val)
+
+        if is_tensorboard:
+            temp_real_stylecode = deepcopy(real_stylecode)
+            vis_real_stylecode = tensor2image(temp_real_stylecode)
 
         e_optim.zero_grad()
         g_optim.zero_grad()
@@ -442,11 +532,78 @@ def ddp_main(rank, world_size, args):
 
         x_rec_loss_val = x_rec_loss.item()
         perceptual_loss_val = perceptual_loss.item()
+        
+        if is_debugging:
+            print('x_rec_loss_val: ', x_rec_loss_val)
+            print('perceptual_loss_val: ', perceptual_loss_val)
 
         pbar.set_description(
             (f"g: {g_loss_val:.4f}; d: {d_loss_val:.4f}; r1: {r1_val:.4f};")
         )
+        
+        if is_tensorboard:
+            # Log losses and images to tensorboard
+            writer.add_scalar('train/adv_loss', adv_loss_val, i)
+            writer.add_scalar('train/w_rec_loss', w_rec_loss_val, i)
+            writer.add_scalar('train/indomaingan_d_loss', indomainGAN_D_loss_val, i)
+            writer.add_scalar('train/d_loss', d_loss_val, i)
+            writer.add_scalar('train/real_score', real_score_val, i)
+            writer.add_scalar('train/fake_score', fake_score_val, i)
+            writer.add_scalar('train/d_reg_loss', d_reg_loss_val, i)
+            writer.add_scalar('train/r1', r1_val, i)
+            writer.add_scalar('train/indomaingan_e_loss', indomainGAN_E_loss_val, i)
+            writer.add_scalar('train/x_rec_loss', x_rec_loss_val, i)
+            writer.add_scalar('train/perceptual_loss', perceptual_loss_val, i)
+            
+            nrow = 2
+            ncol = 3
+            fig = plt.figure(figsize=(30, 10))
+            gs = gridspec.GridSpec(nrow, ncol,
+                                            wspace=0.1, hspace=0.0, 
+                                            top=1.-0.5/(nrow+1), bottom=0.5/(nrow+1), 
+                                            left=0.5/(ncol+1), right=1-0.5/(ncol+1))
+            ax1 = plt.subplot(gs[0, 0])
+            ax1.imshow(vis_real_img)
+            ax1.set_xticklabels([])
+            ax1.set_yticklabels([])
+            ax1.axis('off')
 
+            ax2 = plt.subplot(gs[0, 1])
+            ax2.imshow(vis_fake_img)
+            ax2.set_xticklabels([])
+            ax2.set_yticklabels([])
+            ax2.axis('off')
+
+            ax4 = plt.subplot(gs[1, 0])
+            im4 = ax4.imshow(vis_z_stylecode)
+            divider = make_axes_locatable(ax4)
+            cax = divider.append_axes('right', size='5%', pad=0.05)
+            fig.colorbar(im4, cax=cax, orientation='vertical')
+            ax4.set_xticklabels([])
+            ax4.set_yticklabels([])
+            ax4.axis('off')
+
+            ax5 = plt.subplot(gs[1, 1])
+            im5 = ax5.imshow(vis_real_stylecode)
+            divider = make_axes_locatable(ax5)
+            cax = divider.append_axes('right', size='5%', pad=0.05)
+            fig.colorbar(im5, cax=cax, orientation='vertical')
+            ax5.set_xticklabels([])
+            ax5.set_yticklabels([])
+            ax5.axis('off')
+
+            ax6 = plt.subplot(gs[1, 2])
+            im6 = ax6.imshow(vis_fake_stylecode)
+            divider = make_axes_locatable(ax6)
+            cax = divider.append_axes('right', size='5%', pad=0.05)
+            fig.colorbar(im6, cax=cax, orientation='vertical')
+            ax6.set_xticklabels([])
+            ax6.set_yticklabels([])
+            ax6.axis('off')
+
+            writer.add_figure('train_figs'+str(i), fig)
+
+        # Validation
         with torch.no_grad():
             accumulate(g_ema_module, g_module, accum)
             accumulate(e_ema_module, e_module, accum)
@@ -513,6 +670,9 @@ if __name__ == "__main__":
     parser.add_argument("--train_lmdb", type=str)
     parser.add_argument("--val_lmdb", type=str)
     parser.add_argument("--ckpt", type=str)
+    parser.add_argument("--suffix", type=str)
+    parser.add_argument("--tensorboard_logdir", type=str, default='/home/uss00067/Experiments/StyleMapGAN/logs/')
+
     parser.add_argument(
         "--dataset",
         type=str,
@@ -526,8 +686,8 @@ if __name__ == "__main__":
             "lsun/bedroom",
         ],
     )
-    parser.add_argument("--iter", type=int, default=1400000)
-    parser.add_argument("--save_network_interval", type=int, default=10000)
+    parser.add_argument("--iter", type=int, default=5000) # 5000 training iters in total
+    parser.add_argument("--save_network_interval", type=int, default=50) # Save the checkpoint every 50 iters
     parser.add_argument("--small_generator", action="store_true")
     parser.add_argument("--batch", type=int, default=16, help="total batch sizes")
     parser.add_argument("--size", type=int, choices=[128, 256, 512, 1024], default=256)
@@ -556,6 +716,8 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_indomainGAN_E_loss", type=float, default=1)
 
     input_args = parser.parse_args()
+
+    input_args.tensorboard_logdir = input_args.tensorboard_logdir + input_args.suffix
 
     ngpus = torch.cuda.device_count()
     print("{} GPUS!".format(ngpus))
