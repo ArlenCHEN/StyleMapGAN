@@ -28,8 +28,11 @@ import matplotlib.pyplot as plt
 from matplotlib import gridspec
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from copy import deepcopy
+from data_set.fdc import FDCDataset
 
 torch.backends.cudnn.benchmark = True
+
+random_seed = 1234
 
 def image_grid(array, ncols=8):
     index, height, width, channels = array.shape
@@ -257,6 +260,8 @@ def run(ddp_fn, world_size, args):
     print("world size", world_size)
     mp.spawn(ddp_fn, args=(world_size, args), nprocs=world_size, join=True)
 
+def init_fn(worker_id):
+        np.random.seed(random_seed + worker_id)
 
 def ddp_main(rank, world_size, args):
     print(f"Running DDP model on rank {rank}.")    
@@ -265,6 +270,8 @@ def ddp_main(rank, world_size, args):
 
     torch.cuda.set_device(map_location)
     
+    is_celeba = False
+
     # This condition being true means the training is resumed
     if args.ckpt:  # ignore current arguments
         ckpt = torch.load(args.ckpt, map_location=map_location)
@@ -339,38 +346,57 @@ def ddp_main(rank, world_size, args):
     os.makedirs(save_dir, 0o777, exist_ok=True)
     os.makedirs(save_dir + "/checkpoints", 0o777, exist_ok=True)
 
-    train_dataset = MultiResolutionDataset(args.train_lmdb, transform, args.size)
-    val_dataset = MultiResolutionDataset(args.val_lmdb, transform, args.size)
+    # Original
+    if is_celeba:
+        train_dataset = MultiResolutionDataset(args.train_lmdb, transform, args.size)
+        val_dataset = MultiResolutionDataset(args.val_lmdb, transform, args.size)
+    else:
+        train_dataset = FDCDataset(list_path=args.list_path, set='train')
 
-    print(f"train_dataset: {len(train_dataset)}, val_dataset: {len(val_dataset)}")
+    # Original
+    if is_celeba:
+        print(f"train_dataset: {len(train_dataset)}, val_dataset: {len(val_dataset)}")
+    else:
+        print(f"train_dataset: {len(train_dataset)}")
 
-    val_sampler = torch.utils.data.distributed.DistributedSampler(
-        val_dataset, num_replicas=world_size, rank=rank, shuffle=True
-    )
 
-    val_loader = data.DataLoader(
-        val_dataset,
-        batch_size=args.batch_per_gpu,
-        drop_last=True,
-        sampler=val_sampler,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
+    # Original
+    if is_celeba:
+        val_sampler = torch.utils.data.distributed.DistributedSampler(
+            val_dataset, num_replicas=world_size, rank=rank, shuffle=True
+        )
+        val_loader = data.DataLoader(
+            val_dataset,
+            batch_size=args.batch_per_gpu,
+            drop_last=True,
+            sampler=val_sampler,
+            num_workers=args.num_workers,
+            pin_memory=True,
+        )
 
-    train_sampler = torch.utils.data.distributed.DistributedSampler(
-        train_dataset, num_replicas=world_size, rank=rank, shuffle=True
-    )
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_dataset, num_replicas=world_size, rank=rank, shuffle=True
+        )
 
-    train_loader = data.DataLoader(
-        train_dataset,
-        batch_size=args.batch_per_gpu,
-        drop_last=True,
-        sampler=train_sampler,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
+        train_loader = data.DataLoader(
+            train_dataset,
+            batch_size=args.batch_per_gpu,
+            drop_last=True,
+            sampler=train_sampler,
+            num_workers=args.num_workers,
+            pin_memory=True,
+        )
 
-    train_loader = sample_data(train_loader)
+        train_loader = sample_data(train_loader)
+    else:
+        train_loader = data.DataLoader(train_dataset,
+                                        batch_size=args.batch,
+                                        num_workers=args.num_workers,
+                                        shuffle=True,
+                                        pin_memory=True,
+                                        worker_init_fn=init_fn)
+        train_iter = enumerate(train_loader)
+
     pbar = range(args.start_iter, args.iter)
     pbar = tqdm(pbar, initial=args.start_iter, mininterval=1)
 
@@ -389,12 +415,23 @@ def ddp_main(rank, world_size, args):
             break
         elif i % (len(train_dataset) // args.batch) == 0:
             epoch += 1
-            val_sampler.set_epoch(epoch)
-            train_sampler.set_epoch(epoch)
+            # Original
+            if is_celeba:
+                val_sampler.set_epoch(epoch)
+                train_sampler.set_epoch(epoch)
             print("epoch: ", epoch)
 
-        real_img = next(train_loader)
-        real_img = real_img.to(map_location)
+        # Original
+        if is_celeba:
+            real_img = next(train_loader)
+            real_img = real_img.to(map_location) # Using celeba dataset
+        else:
+            batch_list = train_iter.__next__()
+            temp_batch = batch_list[1]
+            real_img, gt, _, _ = temp_batch
+
+            real_img = real_img.to(map_location)
+            gt = gt.to(map_location)
 
         # Here stylecode is from noise z; fake_stylecode is from encoder
         adv_loss, w_rec_loss, stylecode, fake_stylecode, fake_img = model(None, "G")
@@ -621,66 +658,83 @@ def ddp_main(rank, world_size, args):
                 
                 print('Writing images to tensorboard...')
                 writer.add_figure('train_figs'+str(i), fig)
+        
+        torch.save(
+            {
+                "generator": model.module.generator.state_dict(),
+                "discriminator": model.module.discriminator.state_dict(),
+                "encoder": model.module.encoder.state_dict(),
+                "g_ema": g_ema_module.state_dict(),
+                "e_ema": e_ema_module.state_dict(),
+                "train_args": args,
+                "e_optim": e_optim.state_dict(),
+                "g_optim": g_optim.state_dict(),
+                "d_optim": d_optim.state_dict(),
+            },
+            f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
+        )
+        
+        # Original
+        if is_celeba:
+            # Validation
+            with torch.no_grad():
+                accumulate(g_ema_module, g_module, accum)
+                accumulate(e_ema_module, e_module, accum)
 
-        # Validation
-        with torch.no_grad():
-            accumulate(g_ema_module, g_module, accum)
-            accumulate(e_ema_module, e_module, accum)
+                if i % args.save_network_interval == 0:
+                    copy_norm_params(g_ema_module, g_module)
+                    copy_norm_params(e_ema_module, e_module)
+                    x_rec_loss_avg, perceptual_loss_avg = 0, 0
+                    iter_num = 0
 
-            if i % args.save_network_interval == 0:
-                copy_norm_params(g_ema_module, g_module)
-                copy_norm_params(e_ema_module, e_module)
-                x_rec_loss_avg, perceptual_loss_avg = 0, 0
-                iter_num = 0
+                    for test_image in tqdm(val_loader):
+                        test_image = test_image.to(map_location)
+                        x_rec_loss, perceptual_loss = model(test_image, "cal_mse_lpips")
+                        x_rec_loss_avg += x_rec_loss.mean()
+                        perceptual_loss_avg += perceptual_loss.mean()
+                        iter_num += 1
 
-                for test_image in tqdm(val_loader):
-                    test_image = test_image.to(map_location)
-                    x_rec_loss, perceptual_loss = model(test_image, "cal_mse_lpips")
-                    x_rec_loss_avg += x_rec_loss.mean()
-                    perceptual_loss_avg += perceptual_loss.mean()
-                    iter_num += 1
+                    x_rec_loss_avg /= iter_num
+                    perceptual_loss_avg /= iter_num
 
-                x_rec_loss_avg /= iter_num
-                perceptual_loss_avg /= iter_num
-
-                dist.reduce(
-                    x_rec_loss_avg, dst=0, op=dist.ReduceOp.SUM, group=gpu_group
-                )
-                dist.reduce(
-                    perceptual_loss_avg,
-                    dst=0,
-                    op=dist.ReduceOp.SUM,
-                    group=gpu_group,
-                )
-
-                if rank == 0:
-                    x_rec_loss_avg = x_rec_loss_avg / args.ngpus
-                    perceptual_loss_avg = perceptual_loss_avg / args.ngpus
-                    x_rec_loss_avg_val = x_rec_loss_avg.item()
-                    perceptual_loss_avg_val = perceptual_loss_avg.item()
-
-                    print(
-                        f"x_rec_loss_avg: {x_rec_loss_avg_val}, perceptual_loss_avg: {perceptual_loss_avg_val}"
+                    dist.reduce(
+                        x_rec_loss_avg, dst=0, op=dist.ReduceOp.SUM, group=gpu_group
+                    )
+                    dist.reduce(
+                        perceptual_loss_avg,
+                        dst=0,
+                        op=dist.ReduceOp.SUM,
+                        group=gpu_group,
                     )
 
-                    print(
-                        f"step={i}, epoch={epoch}, x_rec_loss_avg_val={x_rec_loss_avg_val}, perceptual_loss_avg_val={perceptual_loss_avg_val}, d_loss_val={d_loss_val}, indomainGAN_D_loss_val={indomainGAN_D_loss_val}, indomainGAN_E_loss_val={indomainGAN_E_loss_val}, x_rec_loss_val={x_rec_loss_val}, perceptual_loss_val={perceptual_loss_val}, g_loss_val={g_loss_val}, adv_loss_val={adv_loss_val}, w_rec_loss_val={w_rec_loss_val}, r1_val={r1_val}, real_score_val={real_score_val}, fake_score_val={fake_score_val}, latent_std={latent_std}, latent_channel_std={latent_channel_std}, latent_spatial_std={latent_spatial_std}"
-                    )
+                    if rank == 0:
+                        x_rec_loss_avg = x_rec_loss_avg / args.ngpus
+                        perceptual_loss_avg = perceptual_loss_avg / args.ngpus
+                        x_rec_loss_avg_val = x_rec_loss_avg.item()
+                        perceptual_loss_avg_val = perceptual_loss_avg.item()
 
-                    torch.save(
-                        {
-                            "generator": model.module.generator.state_dict(),
-                            "discriminator": model.module.discriminator.state_dict(),
-                            "encoder": model.module.encoder.state_dict(),
-                            "g_ema": g_ema_module.state_dict(),
-                            "e_ema": e_ema_module.state_dict(),
-                            "train_args": args,
-                            "e_optim": e_optim.state_dict(),
-                            "g_optim": g_optim.state_dict(),
-                            "d_optim": d_optim.state_dict(),
-                        },
-                        f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
-                    )
+                        print(
+                            f"x_rec_loss_avg: {x_rec_loss_avg_val}, perceptual_loss_avg: {perceptual_loss_avg_val}"
+                        )
+
+                        print(
+                            f"step={i}, epoch={epoch}, x_rec_loss_avg_val={x_rec_loss_avg_val}, perceptual_loss_avg_val={perceptual_loss_avg_val}, d_loss_val={d_loss_val}, indomainGAN_D_loss_val={indomainGAN_D_loss_val}, indomainGAN_E_loss_val={indomainGAN_E_loss_val}, x_rec_loss_val={x_rec_loss_val}, perceptual_loss_val={perceptual_loss_val}, g_loss_val={g_loss_val}, adv_loss_val={adv_loss_val}, w_rec_loss_val={w_rec_loss_val}, r1_val={r1_val}, real_score_val={real_score_val}, fake_score_val={fake_score_val}, latent_std={latent_std}, latent_channel_std={latent_channel_std}, latent_spatial_std={latent_spatial_std}"
+                        )
+
+                        torch.save(
+                            {
+                                "generator": model.module.generator.state_dict(),
+                                "discriminator": model.module.discriminator.state_dict(),
+                                "encoder": model.module.encoder.state_dict(),
+                                "g_ema": g_ema_module.state_dict(),
+                                "e_ema": e_ema_module.state_dict(),
+                                "train_args": args,
+                                "e_optim": e_optim.state_dict(),
+                                "g_optim": g_optim.state_dict(),
+                                "d_optim": d_optim.state_dict(),
+                            },
+                            f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
+                        )
 
 
 if __name__ == "__main__":
@@ -691,6 +745,7 @@ if __name__ == "__main__":
     parser.add_argument("--ckpt", type=str)
     parser.add_argument("--suffix", type=str)
     parser.add_argument("--tensorboard_logdir", type=str, default='/home/uss00067/Experiments/StyleMapGAN/logs/')
+    parser.add_argument("--list_path", type=str)
 
     parser.add_argument(
         "--dataset",
