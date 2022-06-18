@@ -212,7 +212,7 @@ class DDPModel(nn.Module):
                 fake_img_from_E, _ = self.generator(
                     fake_stylecode, input_is_stylecode=True
                 )
-
+            
             real_pred = self.discriminator(real_img)
             fake_pred = self.discriminator(fake_img)
             d_loss = d_logistic_loss(real_pred, fake_pred)
@@ -433,6 +433,10 @@ def ddp_main(rank, world_size, args):
             real_img = real_img.to(map_location)
             gt = gt.to(map_location)
 
+        if real_img.shape[0] != args.batch:
+            print(f'Data batch wrong---{real_img.shape[0]}, continue...')
+            continue
+
         # Here stylecode is from noise z; fake_stylecode is from encoder
         adv_loss, w_rec_loss, stylecode, fake_stylecode, fake_img = model(None, "G")
 
@@ -493,6 +497,7 @@ def ddp_main(rank, world_size, args):
         e_optim.step()
 
         requires_grad(model.module.discriminator, True)
+
         # D adv
         d_loss, indomainGAN_D_loss, real_score, fake_score = model(real_img, "D")
         d_loss = d_loss.mean()

@@ -56,12 +56,13 @@ class BaseDataset(data.Dataset):
         # Standardazation
         image -= self.mean
 
-        # Normalization
-        image_max = np.max(image)
-        image_min = np.min(image)
-        image_range = image_max - image_min
-        image = (image - image_min) / image_range
-
+        # # Normalization
+        # image_max = np.max(image)
+        # image_min = np.min(image)
+        # image_range = image_max - image_min
+        # image = (image - image_min) / image_range
+        
+        image = image/128.
         final_image = image.transpose((2, 0, 1)) # to [c h w]
         return final_image
 
