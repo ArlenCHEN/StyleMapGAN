@@ -389,10 +389,14 @@ def ddp_main(rank, world_size, args):
 
         train_loader = sample_data(train_loader)
     else:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_dataset, num_replicas=world_size, rank=rank, shuffle=True
+        )
         train_loader = data.DataLoader(train_dataset,
                                         batch_size=args.batch,
+                                        drop_last=True,
+                                        sampler=train_sampler,
                                         num_workers=args.num_workers,
-                                        shuffle=True,
                                         pin_memory=True,
                                         worker_init_fn=init_fn)
         train_iter = enumerate(train_loader)
@@ -419,6 +423,17 @@ def ddp_main(rank, world_size, args):
             if is_celeba:
                 val_sampler.set_epoch(epoch)
                 train_sampler.set_epoch(epoch)
+            else:
+                train_sampler.set_epoch(epoch)
+                train_loader = data.DataLoader(train_dataset,
+                                        batch_size=args.batch,
+                                        drop_last=True,
+                                        sampler=train_sampler,
+                                        num_workers=args.num_workers,
+                                        pin_memory=True,
+                                        worker_init_fn=init_fn)
+                train_iter = enumerate(train_loader)
+
             print("epoch: ", epoch)
 
         # Original
