@@ -24,8 +24,18 @@ class BaseDataset(data.Dataset):
         for name in self.img_ids:
             img_file = os.path.join(name, 'overlaid.png')
             label_file = os.path.join(name, 'gt.png')
+            
+            left_gray_patch_file = os.path.join(name, 'left_patch_gray_angle.png')
+            right_gray_patch_file = os.path.join(name, 'right_patch_gray_angle.png')
+            mouth_gray_patch_file = os.path.join(name, 'mouth_patch_gray_angle.png')
 
-            self.files.append((img_file, label_file, name))
+            left_rgb_gt_file = os.path.join(name, 'left_patch_rgb_gt.png')
+            right_rgb_gt_file = os.path.join(name, 'right_patch_rgb_gt.png')
+            mouth_rgb_gt_file = os.path.join(name, 'mouth_patch_rgb_gt.png')
+
+            self.files.append((img_file, label_file, 
+                                left_gray_patch_file, right_gray_patch_file, mouth_gray_patch_file,
+                                left_rgb_gt_file, right_rgb_gt_file, mouth_rgb_gt_file, name))
 
         # if max_iters is not None:
         #     self.img_ids = self.img_ids * int(np.ceil(float(max_iters) / len(self.img_ids))) # ???
@@ -49,19 +59,19 @@ class BaseDataset(data.Dataset):
     def preprocess(self, image):
         '''
         Standardazation: (x-mean)
-        Normalization: [0, 1]
         '''
         # image = image[:, :, ::-1] # change to BGR???
 
         # Standardazation
         image -= self.mean
 
-        # # Normalization
+        # # Normalization: [0, 1]
         # image_max = np.max(image)
         # image_min = np.min(image)
         # image_range = image_max - image_min
         # image = (image - image_min) / image_range
         
+        # Normalization: [-1, 1]
         image = image/128.
         final_image = image.transpose((2, 0, 1)) # to [c h w]
         return final_image

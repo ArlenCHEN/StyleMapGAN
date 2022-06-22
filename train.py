@@ -19,7 +19,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchvision import transforms
 from training import lpips
-from training.model import Generator, Discriminator, Encoder
+from training.model import Generator, Discriminator, Encoder, LocalPathway
 from training.dataset_ddp import MultiResolutionDataset
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
@@ -29,6 +29,7 @@ from matplotlib import gridspec
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from copy import deepcopy
 from data_set.fdc import FDCDataset
+from training.config import cfg
 
 torch.backends.cudnn.benchmark = True
 
@@ -182,6 +183,10 @@ class DDPModel(nn.Module):
         self.device = device
         self.args = args
 
+        self.local_pathway_left_eye = LocalPathway(use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+        self.local_pathway_right_eye = LocalPathway(use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+        self.local_pathway_mouth = LocalPathway(use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+
     def forward(self, real_img, mode):
         if mode == "G":
             z = make_noise(
@@ -193,12 +198,13 @@ class DDPModel(nn.Module):
             fake_img, stylecode = self.generator(z, return_stylecode=True)
             fake_pred = self.discriminator(fake_img)
             adv_loss = g_nonsaturating_loss(fake_pred)
-            fake_img = fake_img.detach()
-            stylecode = stylecode.detach()
-            fake_stylecode = self.encoder(fake_img)
-            w_rec_loss = self.mse_loss(stylecode, fake_stylecode)
+            # fake_img = fake_img.detach()
+            # stylecode = stylecode.detach()
+            # fake_stylecode = self.encoder(fake_img)
+            # w_rec_loss = self.mse_loss(stylecode, fake_stylecode)
 
-            return adv_loss, w_rec_loss, stylecode, fake_stylecode, fake_img
+            # return adv_loss, w_rec_loss, stylecode, fake_stylecode, fake_img
+            return adv_loss, stylecode, fake_img
 
         elif mode == "D":
             with torch.no_grad():
@@ -237,10 +243,12 @@ class DDPModel(nn.Module):
             return d_reg_loss, r1_loss
 
         elif mode == "E_x_rec":
+            gt = real_img[1] # Read the gt image
+            real_img = real_img[0] # Read the input image
             fake_stylecode = self.encoder(real_img)
             fake_img, _ = self.generator(fake_stylecode, input_is_stylecode=True)
-            x_rec_loss = self.mse_loss(real_img, fake_img)
-            perceptual_loss = self.percept(real_img, fake_img).mean()
+            x_rec_loss = self.mse_loss(gt, fake_img)
+            perceptual_loss = self.percept(gt, fake_img).mean()
             fake_pred_from_E = self.discriminator(fake_img)
             indomainGAN_E_loss = F.softplus(-fake_pred_from_E).mean()
 
@@ -320,6 +328,21 @@ def ddp_main(rank, world_size, args):
     )
 
     accum = 0.999
+
+    local_left_optim = optim.Adam(
+        model.module.local_pathway_left_eye.parameters(),
+        lr = cfg.TRAIN.GRAY2RGB_LR
+    )
+
+    local_right_optim = optim.Adam(
+        model.module.local_pathway_right_eye.parameters(),
+        lr = cfg.TRAIN.GRAY2RGB_LR
+    )
+
+    local_mouth_optim = optim.Adam(
+        model.module.local_pathway_mouth.parameters(),
+        lr = cfg.TRAIN.GRAY2RGB_LR
+    )
 
     if args.ckpt:
         model.module.generator.load_state_dict(ckpt["generator"])
@@ -443,22 +466,29 @@ def ddp_main(rank, world_size, args):
         else:
             batch_list = train_iter.__next__()
             temp_batch = batch_list[1]
-            real_img, gt, _, _ = temp_batch
+            real_img, gt, left_gray, right_gray, mouth_gray, left_gt, right_gt, mouth_gt, _, _ = temp_batch
 
             real_img = real_img.to(map_location)
             gt = gt.to(map_location)
-
+            left_gray = left_gray.to(map_location)
+            right_gray = right_gray.to(map_location)
+            mouth_gray = mouth_gray.to(map_location)
+            left_gt = left_gt.to(map_location)
+            right_gt = right_gt.to(map_location)
+            mouth_gt = mouth_gt.to(map_location)
+            
         if real_img.shape[0] != args.batch:
             print(f'Data batch wrong---{real_img.shape[0]}, continue...')
             continue
 
         # Here stylecode is from noise z; fake_stylecode is from encoder
-        adv_loss, w_rec_loss, stylecode, fake_stylecode, fake_img = model(None, "G")
+        # adv_loss, w_rec_loss, stylecode, fake_stylecode, fake_img = model(None, "G")
+        adv_loss, stylecode, fake_img = model(None, "G")
 
         if is_debugging:
             print('real img: ', real_img.shape)
             print('fake_img: ', fake_img.shape)
-            print('fake stylecode: ', fake_stylecode.shape)
+            # print('fake stylecode: ', fake_stylecode.shape)
             print('z stylecode: ', stylecode.shape)
         
         if is_tensorboard:
@@ -467,14 +497,18 @@ def ddp_main(rank, world_size, args):
             vis_real_img = tensor2image(temp_real_img)
             vis_real_img = (vis_real_img+1)/2.
 
+            temp_gt = gt.detach()
+            vis_gt_img = tensor2image(temp_gt)
+            vis_gt_img = (vis_gt_img+1)/2.
+
             # temp_fake_img = deepcopy(fake_img)
             temp_fake_img = fake_img.detach()
             vis_fake_img = tensor2image(temp_fake_img)
             vis_fake_img = (vis_fake_img+1)/2.
 
             # temp_fake_stylecode = deepcopy(fake_stylecode)
-            temp_fake_stylecode = fake_stylecode.detach()
-            vis_fake_stylecode = tensor2image(temp_fake_stylecode)
+            # temp_fake_stylecode = fake_stylecode.detach()
+            # vis_fake_stylecode = tensor2image(temp_fake_stylecode)
 
             # temp_z_stylecode = deepcopy(stylecode)
             temp_z_stylecode = stylecode.detach()
@@ -501,15 +535,15 @@ def ddp_main(rank, world_size, args):
         )  # Explicitly synchronize Generator parameters. There is a gradient sync bug in G.
         g_optim.step()
 
-        w_rec_loss = w_rec_loss.mean()
-        w_rec_loss_val = w_rec_loss.item()
+        # w_rec_loss = w_rec_loss.mean()
+        # w_rec_loss_val = w_rec_loss.item()
 
-        if is_debugging:
-            print('w_rec_loss_val: ', w_rec_loss_val)
+        # if is_debugging:
+        #     print('w_rec_loss_val: ', w_rec_loss_val)
 
-        e_optim.zero_grad()
-        (w_rec_loss * args.lambda_w_rec_loss).backward()
-        e_optim.step()
+        # e_optim.zero_grad()
+        # (w_rec_loss * args.lambda_w_rec_loss).backward()
+        # e_optim.step()
 
         requires_grad(model.module.discriminator, True)
 
@@ -560,7 +594,8 @@ def ddp_main(rank, world_size, args):
         requires_grad(model.module.discriminator, False)
 
         # E_x_rec
-        x_rec_loss, perceptual_loss, indomainGAN_E_loss, real_stylecode = model(real_img, "E_x_rec")
+        model_input = [real_img, gt]
+        x_rec_loss, perceptual_loss, indomainGAN_E_loss, real_stylecode = model(model_input, "E_x_rec")
         x_rec_loss = x_rec_loss.mean()
         perceptual_loss = perceptual_loss.mean()
 
@@ -608,7 +643,7 @@ def ddp_main(rank, world_size, args):
             # Log losses and images to tensorboard
             print('Writing losses to tensorboard...')
             writer.add_scalar('train/adv_loss', adv_loss_val, i)
-            writer.add_scalar('train/w_rec_loss', w_rec_loss_val, i)
+            # writer.add_scalar('train/w_rec_loss', w_rec_loss_val, i)
             writer.add_scalar('train/indomaingan_d_loss', indomainGAN_D_loss_val, i)
             writer.add_scalar('train/d_loss', d_loss_val, i)
             writer.add_scalar('train/real_score', real_score_val, i)
@@ -646,6 +681,13 @@ def ddp_main(rank, world_size, args):
                 ax2.set_yticklabels([])
                 ax2.axis('off')
 
+                ax3 = plt.subplot(gs[0, 2])
+                ax3.imshow(vis_gt_img)
+                ax3.title.set_text('GT Image')
+                ax3.set_xticklabels([])
+                ax3.set_yticklabels([])
+                ax3.axis('off')
+
                 ax4 = plt.subplot(gs[1, 0])
                 im4 = ax4.imshow(vis_z_stylecode)
                 divider = make_axes_locatable(ax4)
@@ -666,33 +708,34 @@ def ddp_main(rank, world_size, args):
                 ax5.set_yticklabels([])
                 ax5.axis('off')
 
-                ax6 = plt.subplot(gs[1, 2])
-                im6 = ax6.imshow(vis_fake_stylecode)
-                divider = make_axes_locatable(ax6)
-                cax = divider.append_axes('right', size='5%', pad=0.05)
-                fig.colorbar(im6, cax=cax, orientation='vertical')
-                ax6.title.set_text('Fake Stylecode (from E)')
-                ax6.set_xticklabels([])
-                ax6.set_yticklabels([])
-                ax6.axis('off')
+                # ax6 = plt.subplot(gs[1, 2])
+                # im6 = ax6.imshow(vis_fake_stylecode)
+                # divider = make_axes_locatable(ax6)
+                # cax = divider.append_axes('right', size='5%', pad=0.05)
+                # fig.colorbar(im6, cax=cax, orientation='vertical')
+                # ax6.title.set_text('Fake Stylecode (from E)')
+                # ax6.set_xticklabels([])
+                # ax6.set_yticklabels([])
+                # ax6.axis('off')
                 
                 print('Writing images to tensorboard...')
                 writer.add_figure('train_figs'+str(i), fig)
         
-        torch.save(
-            {
-                "generator": model.module.generator.state_dict(),
-                "discriminator": model.module.discriminator.state_dict(),
-                "encoder": model.module.encoder.state_dict(),
-                "g_ema": g_ema_module.state_dict(),
-                "e_ema": e_ema_module.state_dict(),
-                "train_args": args,
-                "e_optim": e_optim.state_dict(),
-                "g_optim": g_optim.state_dict(),
-                "d_optim": d_optim.state_dict(),
-            },
-            f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
-        )
+        if i%args.save_network_interval == 0:
+            torch.save(
+                {
+                    "generator": model.module.generator.state_dict(),
+                    "discriminator": model.module.discriminator.state_dict(),
+                    "encoder": model.module.encoder.state_dict(),
+                    "g_ema": g_ema_module.state_dict(),
+                    "e_ema": e_ema_module.state_dict(),
+                    "train_args": args,
+                    "e_optim": e_optim.state_dict(),
+                    "g_optim": g_optim.state_dict(),
+                    "d_optim": d_optim.state_dict(),
+                },
+                f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
+            )
         
         # Original
         if is_celeba:
@@ -781,7 +824,7 @@ if __name__ == "__main__":
         ],
     )
     parser.add_argument("--iter", type=int, default=5000) # 5000 training iters in total
-    parser.add_argument("--save_network_interval", type=int, default=50) # Save the checkpoint every 50 iters
+    parser.add_argument("--save_network_interval", type=int, default=1000) # Save the checkpoint every 50 iters
     parser.add_argument("--small_generator", action="store_true")
     parser.add_argument("--batch", type=int, default=8, help="total batch sizes")
     parser.add_argument("--size", type=int, choices=[128, 256, 512, 1024], default=256)
