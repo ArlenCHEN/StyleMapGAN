@@ -1,5 +1,5 @@
 import torch.nn as nn
-from torch.nn.init import xavier_normal. kaiming_normal
+from torch.nn.init import xavier_normal, kaiming_normal
 
 def sequential(*kargs):
     seq = nn.Sequential(*kargs)
