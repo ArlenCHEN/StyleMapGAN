@@ -26,6 +26,9 @@ class FDCDataset(BaseDataset):
         ref_gray_np = self.preprocess_gray(ref_gray_np)
         
         overlaid_rgb = self.get_image(overlaid_file)
+        overlaid_rgb_np = np.asarray(overlaid_rgb, np.float32)
+        overlaid_rgb_np = self.preprocess_rgb(overlaid_rgb_np)
+
         overlaid_gray = overlaid_rgb.convert('L')
         overlaid_gray_np = np.asarray(overlaid_gray, np.float32)
         # overlaid_gray_np = np.repeat(overlaid_gray_np[:,:,np.newaxis], 3, axis=2)
@@ -91,7 +94,7 @@ class FDCDataset(BaseDataset):
         mouth_gray_np = self.preprocess_rgb(mouth_gray_np)
 
         # return ref_rgb_np.copy(), ref_gray_np.copy(), overlaid_gray_np.copy(), gt_rgb_np.copy(), gt_gray_np.copy(), mask_np.copy(), left_gray_np.copy(), right_gray_np.copy(), mouth_gray_np.copy(), np.array(ref_rgb_np.shape), name
-        return overlaid_gray_np.copy(), gt_gray_np.copy(), np.array(ref_rgb_np.shape), name
+        return overlaid_rgb_np.copy(), overlaid_gray_np.copy(), gt_rgb_np.copy(), gt_gray_np.copy(), np.array(ref_rgb_np.shape), name
         
         # # Label is the gt rgb image
         # label = self.get_image(label_file)

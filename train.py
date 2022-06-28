@@ -339,12 +339,15 @@ def ddp_main(rank, world_size, args):
     is_celeba = False
     is_debugging = False
     is_tensorboard = True
-    is_gray_2_rgb = True
+    is_gray_2_rgb = False
+
+    global cfg
 
     # This condition being true means the training is resumed
     if args.ckpt:  # ignore current arguments
         ckpt = torch.load(args.ckpt, map_location=map_location)
         train_args = ckpt["train_args"]
+        cfg = ckpt["cfg"]
         print("load model:", args.ckpt)
         train_args.start_iter = int(args.ckpt.split("/")[-1].replace(".pt", ""))
         print(f"continue training from {train_args.start_iter} iter")
@@ -406,15 +409,16 @@ def ddp_main(rank, world_size, args):
     )
 
     global_side_optim = optim.Adam(
-        model.module.local_pathway_mouth.parameters(),
+        model.module.global_side_pathway.parameters(),
         lr = cfg.TRAIN.GRAY2RGB_LR
     )
 
     if args.ckpt:
         if is_gray_2_rgb:
-            model.module.local_pathway_left_eye.load_state_dict(ckpt["local_pathway_left_eye"])
-            model.module.local_pathway_right_eye.load_state_dict(ckpt["local_pathway_right_eye"])
-            model.module.local_pathway_mouth.load_state_dict(ckpt["local_pathway_mouth"])
+            # model.module.local_pathway_left_eye.load_state_dict(ckpt["local_pathway_left_eye"])
+            # model.module.local_pathway_right_eye.load_state_dict(ckpt["local_pathway_right_eye"])
+            # model.module.local_pathway_mouth.load_state_dict(ckpt["local_pathway_mouth"])
+            model.module.global_side_pathway.load_state_dict(ckpt["global_side_pathway"])
         else:
             model.module.generator.load_state_dict(ckpt["generator"])
             model.module.discriminator.load_state_dict(ckpt["discriminator"])
@@ -438,7 +442,7 @@ def ddp_main(rank, world_size, args):
 
     save_dir = "expr"
     os.makedirs(save_dir, 0o777, exist_ok=True)
-    os.makedirs(save_dir + "/checkpoints", 0o777, exist_ok=True)
+    os.makedirs(save_dir + "/checkpoints/" + args.suffix, 0o777, exist_ok=True)
 
     if is_celeba:
         train_dataset = MultiResolutionDataset(args.train_lmdb, transform, args.size)
@@ -530,7 +534,7 @@ def ddp_main(rank, world_size, args):
         else:
             batch_list = train_iter.__next__()
             temp_batch = batch_list[1]
-            # ======== Read inputs for original and gray2rgb ========
+            ## ======== Read inputs for original and gray2rgb ========
             # real_img, gt, left_gray, right_gray, mouth_gray, left_gt, right_gt, mouth_gt, _, _ = temp_batch
 
             # real_img = real_img.to(map_location)
@@ -557,8 +561,12 @@ def ddp_main(rank, world_size, args):
             #     print(f'Data batch wrong---{real_img.shape[0]}, continue...')
             #     continue
 
-            overlaid_gray, gt_gray, _, _ = temp_batch
+            # overlaid_gray, gt_gray, _, _ = temp_batch
+            overlaid_rgb, overlaid_gray, gt_rgb, gt_gray, _, _ = temp_batch
+
+            overlaid_rgb = overlaid_rgb.to(map_location)
             overlaid_gray = overlaid_gray.to(map_location)
+            gt_rgb = gt_rgb.to(map_location)
             gt_gray = gt_gray.to(map_location)
             if overlaid_gray.shape[0] != args.batch:
                 print(f'Data batch wrong---{real_img.shape[0]}, continue...')
@@ -624,6 +632,15 @@ def ddp_main(rank, world_size, args):
                 ax3.set_yticklabels([])
                 ax3.axis('off')
                 writer.add_figure('train_figs'+str(i), fig)
+            if i%args.save_network_interval == 0:
+                torch.save(
+                    {
+                        "global_side_pathway": model.module.global_side_pathway.state_dict(),
+                        "train_args": args,
+                        "cfg": cfg,
+                    },
+                    f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
+                )
 
             # left_model_input = [left_gray, left_gt]
             # left_fake, left_feature, left_rec_loss, left_perceptual_loss = model(left_model_input, 'left')
@@ -791,7 +808,8 @@ def ddp_main(rank, world_size, args):
             # Here stylecode is from noise z; fake_stylecode is from encoder
             # adv_loss, w_rec_loss, stylecode, fake_stylecode, fake_img = model(None, "G")
             adv_loss, stylecode, fake_img = model(None, "G")
-
+            real_img = overlaid_rgb
+            gt = gt_rgb
             if is_debugging:
                 print('real img: ', real_img.shape)
                 print('fake_img: ', fake_img.shape)
@@ -855,7 +873,7 @@ def ddp_main(rank, world_size, args):
             requires_grad(model.module.discriminator, True)
 
             # D adv
-            d_loss, indomainGAN_D_loss, real_score, fake_score = model(real_img, "D")
+            d_loss, indomainGAN_D_loss, real_score, fake_score = model(gt, "D") # Replace real_img with gt
             d_loss = d_loss.mean()
             indomainGAN_D_loss = indomainGAN_D_loss.mean()
             indomainGAN_D_loss_val = indomainGAN_D_loss.item()
@@ -886,7 +904,7 @@ def ddp_main(rank, world_size, args):
             # D reg
             d_regularize = i % args.d_reg_every == 0
             if d_regularize:
-                d_reg_loss, r1_loss = model(real_img, "D_reg")
+                d_reg_loss, r1_loss = model(gt, "D_reg") # Replace the real_img with gt
                 d_reg_loss = d_reg_loss.mean()
                 d_reg_loss_val = d_reg_loss.item()
                 
@@ -925,7 +943,7 @@ def ddp_main(rank, world_size, args):
             e_optim.zero_grad()
             g_optim.zero_grad()
 
-            encoder_loss = (
+            encoder_loss = 100*(
                 x_rec_loss * args.lambda_x_rec_loss
                 + perceptual_loss * args.lambda_perceptual_loss
                 + indomainGAN_E_loss * args.lambda_indomainGAN_E_loss
@@ -1029,6 +1047,7 @@ def ddp_main(rank, world_size, args):
                     writer.add_figure('train_figs'+str(i), fig)
             
             if i%args.save_network_interval == 0:
+                print('Saving network parameters...')
                 torch.save(
                     {
                         "generator": model.module.generator.state_dict(),
@@ -1155,9 +1174,9 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_adv_loss", type=float, default=1)
     parser.add_argument("--lambda_w_rec_loss", type=float, default=1)
     parser.add_argument("--lambda_d_loss", type=float, default=1)
-    parser.add_argument("--lambda_perceptual_loss", type=float, default=1)
+    parser.add_argument("--lambda_perceptual_loss", type=float, default=0.1)
     parser.add_argument("--lambda_indomainGAN_D_loss", type=float, default=1)
-    parser.add_argument("--lambda_indomainGAN_E_loss", type=float, default=1)
+    parser.add_argument("--lambda_indomainGAN_E_loss", type=float, default=0.01)
 
     input_args = parser.parse_args()
 
