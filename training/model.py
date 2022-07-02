@@ -1177,7 +1177,7 @@ from training.fdc_utils import elementwise_mult_cast_int as emci
 from training.fdc_layers import *
 
 class LocalPathway(nn.Module):
-    def __init__(self, use_batchnorm=True, feature_layer_dim=64, fm_mult=1.0):
+    def __init__(self, is_gray, use_batchnorm=True, feature_layer_dim=64, fm_mult=1.0):
         super(LocalPathway, self).__init__()
         n_fm_encoder = [64, 128, 256, 512]
         n_fm_decoder = [256, 128]
@@ -1185,8 +1185,10 @@ class LocalPathway(nn.Module):
         n_fm_decoder = emci(n_fm_decoder, fm_mult)
 
         # Encoder
-        # self.conv0 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
-        self.conv0 = sequential(conv(1, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        if not is_gray:
+            self.conv0 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        else:
+            self.conv0 = sequential(conv(1, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
         self.conv1 = sequential(conv(n_fm_encoder[0], n_fm_encoder[1], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[1], activation=nn.LeakyReLU()))
         self.conv2 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
         self.conv3 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
@@ -1200,8 +1202,10 @@ class LocalPathway(nn.Module):
 
         self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
         self.after_select2 = sequential(conv(feature_layer_dim+self.conv0.out_channels, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
-        # self.local_img = conv(feature_layer_dim, 3, 1, 1, 0, None, None, False)
-        self.local_img = conv(feature_layer_dim, 1, 1, 1, 0, None, None, False)
+        if not is_gray:
+            self.local_img = conv(feature_layer_dim, 3, 1, 1, 0, None, None, False)
+        else:
+            self.local_img = conv(feature_layer_dim, 1, 1, 1, 0, None, None, False)
 
     def forward(self, x):
         conv0 = self.conv0(x)

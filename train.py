@@ -9,7 +9,9 @@ Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
 """
 
 import argparse
+from operator import truediv
 import os
+from tkinter import N
 import torch
 from torch import nn, autograd, optim
 from torch.nn import functional as F
@@ -147,53 +149,62 @@ def filter_mse_values(mask, scale):
     
 
 class DDPModel(nn.Module):
-    def __init__(self, device, args):
+    def __init__(self, is_global, is_ae, is_gray, device, args):
         super(DDPModel, self).__init__()
-        self.generator = Generator(
-            args.size,
-            args.mapping_layer_num,
-            args.latent_channel_size,
-            args.latent_spatial_size,
-            lr_mul=args.lr_mul,
-            channel_multiplier=args.channel_multiplier,
-            normalize_mode=args.normalize_mode,
-            small_generator=args.small_generator,
-        )
-        self.g_ema = Generator(
-            args.size,
-            args.mapping_layer_num,
-            args.latent_channel_size,
-            args.latent_spatial_size,
-            lr_mul=args.lr_mul,
-            channel_multiplier=args.channel_multiplier,
-            normalize_mode=args.normalize_mode,
-            small_generator=args.small_generator,
-        )
-
-        self.discriminator = Discriminator(
-            args.size, channel_multiplier=args.channel_multiplier
-        )
-        self.encoder = Encoder(
-            args.size,
-            args.latent_channel_size,
-            args.latent_spatial_size,
-            channel_multiplier=args.channel_multiplier,
-        )
-
         self.l1_loss = nn.L1Loss(size_average=True)
         self.mse_loss = nn.MSELoss(size_average=True)
-        self.e_ema = Encoder(
-            args.size,
-            args.latent_channel_size,
-            args.latent_spatial_size,
-            channel_multiplier=args.channel_multiplier,
-        )
         self.percept = lpips.exportPerceptualLoss(
             model="net-lin", net="vgg", use_gpu=device.startswith("cuda")
         )
-
         self.device = device
         self.args = args
+        self.is_global = is_global
+        self.is_ae = is_ae
+        self.is_gray = is_gray
+        
+        if self.is_global: # Using global image
+            if not self.is_ae: # Using GAN framework
+                self.generator = Generator(
+                    args.size,
+                    args.mapping_layer_num,
+                    args.latent_channel_size,
+                    args.latent_spatial_size,
+                    lr_mul=args.lr_mul,
+                    channel_multiplier=args.channel_multiplier,
+                    normalize_mode=args.normalize_mode,
+                    small_generator=args.small_generator,
+                )
+                self.g_ema = Generator(
+                    args.size,
+                    args.mapping_layer_num,
+                    args.latent_channel_size,
+                    args.latent_spatial_size,
+                    lr_mul=args.lr_mul,
+                    channel_multiplier=args.channel_multiplier,
+                    normalize_mode=args.normalize_mode,
+                    small_generator=args.small_generator,
+                )
+
+                self.discriminator = Discriminator(
+                    args.size, channel_multiplier=args.channel_multiplier
+                )
+                self.encoder = Encoder(
+                    args.size,
+                    args.latent_channel_size,
+                    args.latent_spatial_size,
+                    channel_multiplier=args.channel_multiplier,
+                )
+                self.e_ema = Encoder(
+                    args.size,
+                    args.latent_channel_size,
+                    args.latent_spatial_size,
+                    channel_multiplier=args.channel_multiplier,
+                )
+            else: # Using AE framework
+                if self.is_gray: # Using gray global image
+                    self.global_gray_ae = LocalPathway(self.is_gray, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+                else: # Using rgb global image
+                    self.global_rgb_ae = LocalPathway(self.is_gray, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
 
         self.local_pathway_left_eye = LocalPathway(use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
         self.local_pathway_right_eye = LocalPathway(use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
@@ -303,25 +314,25 @@ class DDPModel(nn.Module):
             mouth_rec_loss = self.mse_loss(mouth_gt, mouth_fake)
             mouth_perceptual_loss = self.percept(mouth_gt, mouth_fake).mean()
             return mouth_fake, mouth_feature, mouth_rec_loss, mouth_perceptual_loss
-        elif mode == 'global_frontal':
-            # Input is the overlaid image with frontal gray patches
-            global_frontal_gray = real_img[0]
-            global_gray_gt = real_img[1]
-            mask = real_img[3] # This mask specifies semantic classes
-            global_frontal_gray_fake, global_frontal_gray_feature = self.local_pathway_global_frontal(global_frontal_gray)
-            new_mask = filter_mse_values(mask, cfg.TRAIN.MSE_MARGIN_SCALE)
-            # todo: multiply mask with the image
-
-        elif mode == 'global_side':
+        elif mode == 'global_gray_ae':
             # Input is the overlaid image with the raw side patches
             global_side_gray = real_img[0]
             global_gray_gt = real_img[1]
             
-            global_side_fake, global_side_feature = self.global_side_pathway(global_side_gray)
+            global_side_fake, global_side_feature = self.global_gray_ae(global_side_gray)
             global_side_rec_loss = self.mse_loss(global_gray_gt, global_side_fake)
             global_side_perceptual_loss = self.percept(global_gray_gt, global_side_fake).mean()
             return global_side_fake, global_side_feature, global_side_rec_loss, global_side_perceptual_loss
-
+        elif mode == 'global_rgb_ae':
+            # Input is the overlaid image with the raw side patches
+            global_side_rgb = real_img[0]
+            global_gray_gt = real_img[1]
+            
+            global_side_fake, global_side_feature = self.global_rgb_ae(global_side_gray)
+            global_side_rec_loss = self.mse_loss(global_gray_gt, global_side_fake)
+            global_side_perceptual_loss = self.percept(global_gray_gt, global_side_fake).mean()
+            return global_side_fake, global_side_feature, global_side_rec_loss, global_side_perceptual_loss
+            
 def run(ddp_fn, world_size, args):
     print("world size", world_size)
     mp.spawn(ddp_fn, args=(world_size, args), nprocs=world_size, join=True)
@@ -339,25 +350,43 @@ def ddp_main(rank, world_size, args):
     is_celeba = False
     is_debugging = False
     is_tensorboard = True
-    is_gray_2_rgb = False
+    # is_gray_2_rgb = True
+
+    is_ae = True # Use autoencoder structure
+    is_gray = False # Is the input image grayscale or rgb?
+    is_global = True # Is the input small patch or a whole face
 
     global cfg
 
+    # Those two variable does not exist if the resume iter is not proper
+    r1_val = None
+    d_reg_loss_val = None
+
     # This condition being true means the training is resumed
     if args.ckpt:  # ignore current arguments
-        ckpt = torch.load(args.ckpt, map_location=map_location)
-        train_args = ckpt["train_args"]
-        cfg = ckpt["cfg"]
-        print("load model:", args.ckpt)
-        train_args.start_iter = int(args.ckpt.split("/")[-1].replace(".pt", ""))
-        print(f"continue training from {train_args.start_iter} iter")
-        args = train_args
-        args.ckpt = True
+        if is_ae:
+            ckpt = torch.load(args.ckpt, map_location=map_location)
+            train_args = ckpt["train_args"]
+            cfg = ckpt["cfg"] # Note: Only read this when pathway net is used
+            print("load model:", args.ckpt)
+            train_args.start_iter = int(args.ckpt.split("/")[-1].replace(".pt", ""))
+            print(f"continue training from {train_args.start_iter} iter")
+            args = train_args
+            args.ckpt = True
+        else:
+            ckpt = torch.load(args.ckpt, map_location=map_location)
+            train_args = ckpt["train_args"]
+            # cfg = ckpt["cfg"] # Note: Only read this when pathway net is used
+            print("load model:", args.ckpt)
+            train_args.start_iter = int(args.ckpt.split("/")[-1].replace(".pt", ""))
+            print(f"continue training from {train_args.start_iter} iter")
+            args = train_args
+            args.ckpt = True
     else:
         args.start_iter = 0
 
     # create model and move it to GPU with id rank
-    model = DDPModel(device=map_location, args=args).to(map_location)
+    model = DDPModel(is_gray, is_global, device=map_location, args=args).to(map_location)
     model = DDP(model, device_ids=[rank], find_unused_parameters=True)
     model.train()
 
@@ -414,11 +443,14 @@ def ddp_main(rank, world_size, args):
     )
 
     if args.ckpt:
-        if is_gray_2_rgb:
+        if is_ae:
             # model.module.local_pathway_left_eye.load_state_dict(ckpt["local_pathway_left_eye"])
             # model.module.local_pathway_right_eye.load_state_dict(ckpt["local_pathway_right_eye"])
             # model.module.local_pathway_mouth.load_state_dict(ckpt["local_pathway_mouth"])
-            model.module.global_side_pathway.load_state_dict(ckpt["global_side_pathway"])
+            if is_gray:
+                model.module.global_side_pathway.load_state_dict(ckpt["gray_ae"])
+            else:
+                model.module.global_side_pathway.load_state_dict(ckpt["rgb_ae"])
         else:
             model.module.generator.load_state_dict(ckpt["generator"])
             model.module.discriminator.load_state_dict(ckpt["discriminator"])
@@ -960,9 +992,14 @@ def ddp_main(rank, world_size, args):
                 print('x_rec_loss_val: ', x_rec_loss_val)
                 print('perceptual_loss_val: ', perceptual_loss_val)
 
-            pbar.set_description(
-                (f"g: {g_loss_val:.4f}; d: {d_loss_val:.4f}; r1: {r1_val:.4f};")
-            )
+            if r1_val is None:
+                pbar.set_description(
+                    (f"g: {g_loss_val:.4f}; d: {d_loss_val:.4f};")
+                )
+            else:
+                pbar.set_description(
+                    (f"g: {g_loss_val:.4f}; d: {d_loss_val:.4f}; r1: {r1_val:.4f};")
+                )
             
             if is_tensorboard:
                 # Log losses and images to tensorboard
@@ -973,8 +1010,9 @@ def ddp_main(rank, world_size, args):
                 writer.add_scalar('train/d_loss', d_loss_val, i)
                 writer.add_scalar('train/real_score', real_score_val, i)
                 writer.add_scalar('train/fake_score', fake_score_val, i)
-                writer.add_scalar('train/d_reg_loss', d_reg_loss_val, i)
-                writer.add_scalar('train/r1', r1_val, i)
+                if d_reg_loss_val is not None and r1_val is not None:
+                    writer.add_scalar('train/d_reg_loss', d_reg_loss_val, i)
+                    writer.add_scalar('train/r1', r1_val, i)
                 writer.add_scalar('train/indomaingan_e_loss', indomainGAN_E_loss_val, i)
                 writer.add_scalar('train/x_rec_loss', x_rec_loss_val, i)
                 writer.add_scalar('train/perceptual_loss', perceptual_loss_val, i)
@@ -1060,7 +1098,7 @@ def ddp_main(rank, world_size, args):
                         "g_optim": g_optim.state_dict(),
                         "d_optim": d_optim.state_dict(),
                     },
-                    f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
+                    f"{save_dir}/checkpoints/{args.suffix}/{str(i).zfill(6)}.pt",
                 )
         
         # Original
