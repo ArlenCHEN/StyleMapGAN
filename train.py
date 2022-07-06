@@ -205,13 +205,10 @@ class DDPModel(nn.Module):
                     self.global_gray_ae = LocalPathway(self.is_gray, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
                 else: # Using rgb global image
                     self.global_rgb_ae = LocalPathway(self.is_gray, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
-
-        self.local_pathway_left_eye = LocalPathway(use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
-        self.local_pathway_right_eye = LocalPathway(use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
-        self.local_pathway_mouth = LocalPathway(use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
-
-        self.global_side_pathway = LocalPathway(use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
-        self.gloabl_frontal_pathway = LocalPathway(use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+        else:
+            self.local_pathway_left_eye = LocalPathway(self.is_gray, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+            self.local_pathway_right_eye = LocalPathway(self.is_gray, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+            self.local_pathway_mouth = LocalPathway(self.is_gray, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
 
     def forward(self, real_img, mode):
         if mode == "G":
@@ -328,7 +325,7 @@ class DDPModel(nn.Module):
             global_side_rgb = real_img[0]
             global_gray_gt = real_img[1]
             
-            global_side_fake, global_side_feature = self.global_rgb_ae(global_side_gray)
+            global_side_fake, global_side_feature = self.global_rgb_ae(global_side_rgb)
             global_side_rec_loss = self.mse_loss(global_gray_gt, global_side_fake)
             global_side_perceptual_loss = self.percept(global_gray_gt, global_side_fake).mean()
             return global_side_fake, global_side_feature, global_side_rec_loss, global_side_perceptual_loss
@@ -386,61 +383,69 @@ def ddp_main(rank, world_size, args):
         args.start_iter = 0
 
     # create model and move it to GPU with id rank
-    model = DDPModel(is_gray, is_global, device=map_location, args=args).to(map_location)
+    model = DDPModel(is_global, is_ae, is_gray, device=map_location, args=args).to(map_location)
     model = DDP(model, device_ids=[rank], find_unused_parameters=True)
     model.train()
 
-    g_module = model.module.generator
-    g_ema_module = model.module.g_ema
-    g_ema_module.eval()
-    accumulate(g_ema_module, g_module, 0)
+    if not is_ae: # Define models for GAN
+        g_module = model.module.generator
+        g_ema_module = model.module.g_ema
+        g_ema_module.eval()
+        accumulate(g_ema_module, g_module, 0)
 
-    e_module = model.module.encoder
-    e_ema_module = model.module.e_ema
-    e_ema_module.eval()
-    accumulate(e_ema_module, e_module, 0)
+        e_module = model.module.encoder
+        e_ema_module = model.module.e_ema
+        e_ema_module.eval()
+        accumulate(e_ema_module, e_module, 0)
 
-    d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1)
+        d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1)
 
-    g_optim = optim.Adam(
-        g_module.parameters(),
-        lr=args.lr,
-        betas=(0, 0.99),
-    )
+        g_optim = optim.Adam(
+            g_module.parameters(),
+            lr=args.lr,
+            betas=(0, 0.99),
+        )
 
-    d_optim = optim.Adam(
-        model.module.discriminator.parameters(),
-        lr=args.lr * d_reg_ratio,
-        betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
-    )
+        d_optim = optim.Adam(
+            model.module.discriminator.parameters(),
+            lr=args.lr * d_reg_ratio,
+            betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
+        )
 
-    e_optim = optim.Adam(
-        e_module.parameters(),
-        lr=args.lr,
-        betas=(0, 0.99),
-    )
+        e_optim = optim.Adam(
+            e_module.parameters(),
+            lr=args.lr,
+            betas=(0, 0.99),
+        )
 
-    accum = 0.999
+        accum = 0.999
+    else: # Define models for AE
+        if is_global:
+            if is_gray:
+                global_gray_ae_optim = optim.Adam(
+                    model.module.global_gray_ae.parameters(),
+                    lr = cfg.TRAIN.GLOBAL_AE_LR
+                )
+            else:
+                global_rgb_ae_optim = optim.Adam(
+                    model.module.global_rgb_ae.parameters(),
+                    lr = cfg.TRAIN.GLOBAL_AE_LR
+                )
+        else:
+            local_left_optim = optim.Adam(
+                model.module.local_pathway_left_eye.parameters(),
+                lr = cfg.TRAIN.GRAY2RGB_LR
+            )
 
-    local_left_optim = optim.Adam(
-        model.module.local_pathway_left_eye.parameters(),
-        lr = cfg.TRAIN.GRAY2RGB_LR
-    )
+            local_right_optim = optim.Adam(
+                model.module.local_pathway_right_eye.parameters(),
+                lr = cfg.TRAIN.GRAY2RGB_LR
+            )
 
-    local_right_optim = optim.Adam(
-        model.module.local_pathway_right_eye.parameters(),
-        lr = cfg.TRAIN.GRAY2RGB_LR
-    )
-
-    local_mouth_optim = optim.Adam(
-        model.module.local_pathway_mouth.parameters(),
-        lr = cfg.TRAIN.GRAY2RGB_LR
-    )
-
-    global_side_optim = optim.Adam(
-        model.module.global_side_pathway.parameters(),
-        lr = cfg.TRAIN.GRAY2RGB_LR
-    )
+            local_mouth_optim = optim.Adam(
+                model.module.local_pathway_mouth.parameters(),
+                lr = cfg.TRAIN.GRAY2RGB_LR
+            )
 
     if args.ckpt:
         if is_ae:
@@ -448,9 +453,9 @@ def ddp_main(rank, world_size, args):
             # model.module.local_pathway_right_eye.load_state_dict(ckpt["local_pathway_right_eye"])
             # model.module.local_pathway_mouth.load_state_dict(ckpt["local_pathway_mouth"])
             if is_gray:
-                model.module.global_side_pathway.load_state_dict(ckpt["gray_ae"])
+                model.module.global_gray_ae.load_state_dict(ckpt["global_gray_ae"])
             else:
-                model.module.global_side_pathway.load_state_dict(ckpt["rgb_ae"])
+                model.module.global_rgb_ae.load_state_dict(ckpt["global_rgb_ae"])
         else:
             model.module.generator.load_state_dict(ckpt["generator"])
             model.module.discriminator.load_state_dict(ckpt["discriminator"])
@@ -480,7 +485,7 @@ def ddp_main(rank, world_size, args):
         train_dataset = MultiResolutionDataset(args.train_lmdb, transform, args.size)
         val_dataset = MultiResolutionDataset(args.val_lmdb, transform, args.size)
     else:
-        train_dataset = FDCDataset(list_path=args.list_path, set='train')
+        train_dataset = FDCDataset(is_global, list_path=args.list_path, set='train')
 
     if is_celeba:
         print(f"train_dataset: {len(train_dataset)}, val_dataset: {len(val_dataset)}")
@@ -530,7 +535,9 @@ def ddp_main(rank, world_size, args):
     pbar = range(args.start_iter, args.iter)
     pbar = tqdm(pbar, initial=args.start_iter, mininterval=1)
 
-    requires_grad(model.module.discriminator, False)
+    if not is_ae:
+        requires_grad(model.module.discriminator, False)
+
     epoch = -1
     gpu_group = dist.new_group(list(range(args.ngpus)))
 
@@ -560,23 +567,35 @@ def ddp_main(rank, world_size, args):
 
             print("epoch: ", epoch)
 
-        if is_celeba:
+        if is_celeba: # CelebA data
             real_img = next(train_loader)
             real_img = real_img.to(map_location) # Using celeba dataset
-        else:
-            batch_list = train_iter.__next__()
-            temp_batch = batch_list[1]
-            ## ======== Read inputs for original and gray2rgb ========
-            # real_img, gt, left_gray, right_gray, mouth_gray, left_gt, right_gt, mouth_gt, _, _ = temp_batch
+        else: # FDC data
+            if is_global:
+                batch_list = train_iter.__next__()
+                temp_batch = batch_list[1]
 
-            # real_img = real_img.to(map_location)
-            # gt = gt.to(map_location)
-            # left_gray = left_gray.to(map_location)
-            # right_gray = right_gray.to(map_location)
-            # mouth_gray = mouth_gray.to(map_location)
-            # left_gt = left_gt.to(map_location)
-            # right_gt = right_gt.to(map_location)
-            # mouth_gt = mouth_gt.to(map_location)
+                overlaid_rgb, overlaid_gray, gt_rgb, gt_gray, _, _ = temp_batch
+
+                overlaid_rgb = overlaid_rgb.to(map_location)
+                overlaid_gray = overlaid_gray.to(map_location)
+                gt_rgb = gt_rgb.to(map_location)
+                gt_gray = gt_gray.to(map_location)
+                if overlaid_gray.shape[0] != args.batch:
+                    print(f'Data batch wrong---{real_img.shape[0]}, continue...')
+                    continue
+            else:
+                # ======== Read inputs for original and gray2rgb ========
+                real_img, gt, left_gray, right_gray, mouth_gray, left_gt, right_gt, mouth_gt, _, _ = temp_batch
+
+                real_img = real_img.to(map_location)
+                gt = gt.to(map_location)
+                left_gray = left_gray.to(map_location)
+                right_gray = right_gray.to(map_location)
+                mouth_gray = mouth_gray.to(map_location)
+                left_gt = left_gt.to(map_location)
+                right_gt = right_gt.to(map_location)
+                mouth_gt = mouth_gt.to(map_location)
 
             # ======== Read inputs for new model ========
             # ref_rgb, ref_gray, overlaid_gray, gt_rgb, gt_gray, mask, left_gray, right_gray, mouth_gray, _, _ = temp_batch
@@ -594,248 +613,274 @@ def ddp_main(rank, world_size, args):
             #     continue
 
             # overlaid_gray, gt_gray, _, _ = temp_batch
-            overlaid_rgb, overlaid_gray, gt_rgb, gt_gray, _, _ = temp_batch
-
-            overlaid_rgb = overlaid_rgb.to(map_location)
-            overlaid_gray = overlaid_gray.to(map_location)
-            gt_rgb = gt_rgb.to(map_location)
-            gt_gray = gt_gray.to(map_location)
-            if overlaid_gray.shape[0] != args.batch:
-                print(f'Data batch wrong---{real_img.shape[0]}, continue...')
-                continue
+            
         
         # if real_img.shape[0] != args.batch:
         #     print(f'Data batch wrong---{real_img.shape[0]}, continue...')
         #     continue
 
-        if is_gray_2_rgb:
-            global_side_input = [overlaid_gray, gt_gray]
-            global_side_fake, global_side_feature, global_side_rec_loss, global_side_perceptual_loss = model(global_side_input, 'global_side')
-            global_side_optim.zero_grad()
-            global_side_loss = (global_side_rec_loss*args.lambda_x_rec_loss + 
-                                global_side_perceptual_loss*args.lambda_perceptual_loss)
-            global_side_loss.backward()
-            global_side_optim.step()
+        if is_ae:
+            if is_global:
+                if is_gray: # Gray global input
+                    global_gray_input = [overlaid_gray, gt_gray]
+                    global_gray_fake, global_gray_feature, global_gray_rec_loss, global_gray_perceptual_loss = model(global_gray_input, 'global_gray_ae')
+                    global_input = overlaid_gray
+                    global_fake = global_gray_fake
+                    global_feature = global_gray_feature
+                    global_rec_loss = global_gray_rec_loss
+                    global_perceptual_loss = global_gray_perceptual_loss
+                    global_gt = gt_gray
 
-            print('Writing losses to tensorboard...')
-            writer.add_scalar('train/global_side_rec_loss', global_side_rec_loss, i)
-            writer.add_scalar('train/global_side_percept_loss', global_side_perceptual_loss, i)
+                    global_gray_ae_optim.zero_grad()
+                    global_gray_loss = (global_rec_loss*args.lambda_x_rec_loss + 
+                                        global_perceptual_loss*args.lambda_perceptual_loss)
+                    global_gray_loss.backward()
+                    global_gray_ae_optim.step()
+                else: # RGB global input
+                    global_rgb_input = [overlaid_rgb, gt_rgb]
+                    global_rgb_fake, global_rgb_feature, global_rgb_rec_loss, global_rgb_perceptual_loss = model(global_rgb_input, 'global_rgb_ae')
+                    global_input = overlaid_rgb
+                    global_fake = global_rgb_fake
+                    global_feature = global_rgb_feature
+                    global_rec_loss = global_rgb_rec_loss
+                    global_perceptual_loss = global_rgb_perceptual_loss
+                    global_gt = gt_rgb
 
-            log_imgs_every = 5
-            if i%log_imgs_every == 0:
-                temp_global_side_gray = overlaid_gray.detach()
-                vis_global_side_gray = tensor2image(temp_global_side_gray)
-                vis_global_side_gray = (vis_global_side_gray+1)/2.
+                    global_rgb_ae_optim.zero_grad()
+                    global_rgb_loss = (global_rec_loss*args.lambda_x_rec_loss + 
+                                        global_perceptual_loss*args.lambda_perceptual_loss)
+                    global_rgb_loss.backward()
+                    global_rgb_ae_optim.step()
 
-                temp_global_side_fake = global_side_fake.detach()
-                vis_global_side_fake = tensor2image(temp_global_side_fake)
-                vis_global_side_fake = (vis_global_side_fake+1)/2.
+                print('Writing losses to tensorboard...')
+                writer.add_scalar('train/global_rec_loss', global_rec_loss, i)
+                writer.add_scalar('train/global_percept_loss', global_perceptual_loss, i)
 
-                temp_gt_gray = gt_gray.detach()
-                vis_gt_gray = tensor2image(temp_gt_gray)
-                vis_gt_gray = (vis_gt_gray+1)/2.
+                log_imgs_every = 5
+                if i%log_imgs_every == 0:
+                    temp_global_input = global_input.detach()
+                    vis_global_input = tensor2image(temp_global_input)
+                    vis_global_input = (vis_global_input+1)/2.
 
-                print('Writing images to tensorboard')
-                nrow = 1
-                ncol = 3
-                fig = plt.figure(figsize=(10, 10))
-                gs = gridspec.GridSpec(nrow, ncol,
-                                                wspace=0.1, hspace=0.0, 
-                                                top=1.-0.5/(nrow+1), bottom=0.5/(nrow+1), 
-                                                left=0.5/(ncol+1), right=1-0.5/(ncol+1))
-                ax1 = plt.subplot(gs[0, 0])
-                ax1.imshow(vis_global_side_gray)
-                # ax1.title.set_text('Real Image')
-                ax1.set_xticklabels([])
-                ax1.set_yticklabels([])
-                ax1.axis('off')
+                    temp_global_fake = global_fake.detach()
+                    vis_global_fake = tensor2image(temp_global_fake)
+                    vis_global_fake = (vis_global_fake+1)/2.
 
-                ax2 = plt.subplot(gs[0, 1])
-                ax2.imshow(vis_global_side_fake)
-                # ax2.title.set_text('Fake Image')
-                ax2.set_xticklabels([])
-                ax2.set_yticklabels([])
-                ax2.axis('off')
+                    temp_global_gt = global_gt.detach()
+                    vis_global_gt = tensor2image(temp_global_gt)
+                    vis_global_gt = (vis_global_gt+1)/2.
 
-                ax3 = plt.subplot(gs[0, 2])
-                ax3.imshow(vis_gt_gray)
-                # ax2.title.set_text('Fake Image')
-                ax3.set_xticklabels([])
-                ax3.set_yticklabels([])
-                ax3.axis('off')
-                writer.add_figure('train_figs'+str(i), fig)
-            if i%args.save_network_interval == 0:
-                torch.save(
-                    {
-                        "global_side_pathway": model.module.global_side_pathway.state_dict(),
-                        "train_args": args,
-                        "cfg": cfg,
-                    },
-                    f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
-                )
+                    print('Writing images to tensorboard')
+                    nrow = 1
+                    ncol = 3
+                    fig = plt.figure(figsize=(10, 10))
+                    gs = gridspec.GridSpec(nrow, ncol,
+                                                    wspace=0.1, hspace=0.0, 
+                                                    top=1.-0.5/(nrow+1), bottom=0.5/(nrow+1), 
+                                                    left=0.5/(ncol+1), right=1-0.5/(ncol+1))
+                    ax1 = plt.subplot(gs[0, 0])
+                    ax1.imshow(vis_global_input)
+                    # ax1.title.set_text('Real Image')
+                    ax1.set_xticklabels([])
+                    ax1.set_yticklabels([])
+                    ax1.axis('off')
 
-            # left_model_input = [left_gray, left_gt]
-            # left_fake, left_feature, left_rec_loss, left_perceptual_loss = model(left_model_input, 'left')
-            # local_left_optim.zero_grad()
-            # left_local_loss = (left_rec_loss*args.lambda_x_rec_loss+
-            #                     left_perceptual_loss*args.lambda_perceptual_loss)            
-            # left_local_loss.backward()
-            # local_left_optim.step()
+                    ax2 = plt.subplot(gs[0, 1])
+                    ax2.imshow(vis_global_fake)
+                    # ax2.title.set_text('Fake Image')
+                    ax2.set_xticklabels([])
+                    ax2.set_yticklabels([])
+                    ax2.axis('off')
 
-            # right_model_input = [right_gray, right_gt]
-            # right_fake, right_feature, right_rec_loss, right_perceptual_loss = model(right_model_input, 'right')
-            # local_right_optim.zero_grad()
-            # right_local_loss = (right_rec_loss*args.lambda_x_rec_loss+
-            #                     right_perceptual_loss*args.lambda_perceptual_loss)
-            # right_local_loss.backward()
-            # local_right_optim.step()
+                    ax3 = plt.subplot(gs[0, 2])
+                    ax3.imshow(vis_global_gt)
+                    # ax2.title.set_text('Fake Image')
+                    ax3.set_xticklabels([])
+                    ax3.set_yticklabels([])
+                    ax3.axis('off')
+                    writer.add_figure('train_figs'+str(i), fig)
+                if i%args.save_network_interval == 0:
+                    if is_gray: # Save the global gray ae model
+                        torch.save(
+                        {
+                            "global_gray_ae": model.module.global_gray_ae.state_dict(),
+                            "train_args": args,
+                            "cfg": cfg,
+                        },
+                        f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
+                    )
+                    else: # Save the global rgb model
+                        torch.save(
+                        {
+                            "global_rgb_ae": model.module.global_rgb_ae.state_dict(),
+                            "train_args": args,
+                            "cfg": cfg,
+                        },
+                        f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
+                    )
+            else:
+                left_model_input = [left_gray, left_gt]
+                left_fake, left_feature, left_rec_loss, left_perceptual_loss = model(left_model_input, 'left')
+                local_left_optim.zero_grad()
+                left_local_loss = (left_rec_loss*args.lambda_x_rec_loss+
+                                    left_perceptual_loss*args.lambda_perceptual_loss)            
+                left_local_loss.backward()
+                local_left_optim.step()
 
-            # mouth_model_input = [mouth_gray, mouth_gt]
-            # mouth_fake, mouth_feature, mouth_rec_loss, mouth_perceptual_loss = model(mouth_model_input, 'mouth')
-            # local_mouth_optim.zero_grad()
-            # mouth_local_loss = (mouth_rec_loss*args.lambda_x_rec_loss+
-            #                     mouth_perceptual_loss*args.lambda_perceptual_loss)
-            # mouth_local_loss.backward()
-            # local_mouth_optim.step()
+                right_model_input = [right_gray, right_gt]
+                right_fake, right_feature, right_rec_loss, right_perceptual_loss = model(right_model_input, 'right')
+                local_right_optim.zero_grad()
+                right_local_loss = (right_rec_loss*args.lambda_x_rec_loss+
+                                    right_perceptual_loss*args.lambda_perceptual_loss)
+                right_local_loss.backward()
+                local_right_optim.step()
 
-            # if is_tensorboard:
-            #     # Left gray image
-            #     temp_left_gray = left_gray.detach()
-            #     vis_left_gray = tensor2image(temp_left_gray)
-            #     vis_left_gray = (vis_left_gray+1)/2.
+                mouth_model_input = [mouth_gray, mouth_gt]
+                mouth_fake, mouth_feature, mouth_rec_loss, mouth_perceptual_loss = model(mouth_model_input, 'mouth')
+                local_mouth_optim.zero_grad()
+                mouth_local_loss = (mouth_rec_loss*args.lambda_x_rec_loss+
+                                    mouth_perceptual_loss*args.lambda_perceptual_loss)
+                mouth_local_loss.backward()
+                local_mouth_optim.step()
 
-            #     # Left gt image
-            #     temp_left_gt = left_gt.detach()
-            #     vis_left_gt = tensor2image(temp_left_gt)
-            #     vis_left_gt = (vis_left_gt+1)/2.
+                if is_tensorboard:
+                    # Left gray image
+                    temp_left_gray = left_gray.detach()
+                    vis_left_gray = tensor2image(temp_left_gray)
+                    vis_left_gray = (vis_left_gray+1)/2.
 
-            #     # Left fake image
-            #     temp_left_fake = left_fake.detach()
-            #     vis_left_fake = tensor2image(temp_left_fake)
-            #     vis_left_fake = (vis_left_fake+1)/2.
+                    # Left gt image
+                    temp_left_gt = left_gt.detach()
+                    vis_left_gt = tensor2image(temp_left_gt)
+                    vis_left_gt = (vis_left_gt+1)/2.
 
-            #     # Right gray image
-            #     temp_right_gray = right_gray.detach()
-            #     vis_right_gray = tensor2image(temp_right_gray)
-            #     vis_right_gray = (vis_right_gray+1)/2.
+                    # Left fake image
+                    temp_left_fake = left_fake.detach()
+                    vis_left_fake = tensor2image(temp_left_fake)
+                    vis_left_fake = (vis_left_fake+1)/2.
 
-            #     # Right gt image
-            #     temp_right_gt = right_gt.detach()
-            #     vis_right_gt = tensor2image(temp_right_gt)
-            #     vis_right_gt = (vis_right_gt+1)/2.
+                    # Right gray image
+                    temp_right_gray = right_gray.detach()
+                    vis_right_gray = tensor2image(temp_right_gray)
+                    vis_right_gray = (vis_right_gray+1)/2.
+
+                    # Right gt image
+                    temp_right_gt = right_gt.detach()
+                    vis_right_gt = tensor2image(temp_right_gt)
+                    vis_right_gt = (vis_right_gt+1)/2.
+                    
+                    # Right fake image
+                    temp_right_fake = right_fake.detach()
+                    vis_right_fake = tensor2image(temp_right_fake)
+                    vis_right_fake = (vis_right_fake+1)/2.
+
+                    # Mouth gray image
+                    temp_mouth_gray = mouth_gray.detach()
+                    vis_mouth_gray = tensor2image(temp_mouth_gray)
+                    vis_mouth_gray = (vis_mouth_gray+1)/2.
+                    
+                    # Mouth gt image
+                    temp_mouth_gt = mouth_gt.detach()
+                    vis_mouth_gt = tensor2image(temp_mouth_gt)
+                    vis_mouth_gt = (vis_mouth_gt+1)/2.
+
+                    # Mouth fake image
+                    temp_mouth_fake = mouth_fake.detach()
+                    vis_mouth_fake = tensor2image(temp_mouth_fake)
+                    vis_mouth_fake = (vis_mouth_fake+1)/2.
+
+                    print('Writing losses to tensorboard...')
+                    writer.add_scalar('train/left_rec_loss', left_rec_loss, i)
+                    writer.add_scalar('train/left_percept_loss', left_perceptual_loss, i)
+                    writer.add_scalar('train/right_rec_loss', right_rec_loss, i)
+                    writer.add_scalar('train/right_percept_loss', right_perceptual_loss, i)
+                    writer.add_scalar('train/mouth_rec_loss', mouth_rec_loss, i)
+                    writer.add_scalar('train/mouth_percept_loss', mouth_perceptual_loss, i)
+
+                    log_imgs_every = 5
+                    if i%log_imgs_every == 0:
+                        nrow = 3
+                        ncol = 3
+                        fig = plt.figure(figsize=(10, 10))
+                        gs = gridspec.GridSpec(nrow, ncol,
+                                                        wspace=0.1, hspace=0.0, 
+                                                        top=1.-0.5/(nrow+1), bottom=0.5/(nrow+1), 
+                                                        left=0.5/(ncol+1), right=1-0.5/(ncol+1))
+                        ax1 = plt.subplot(gs[0, 0])
+                        ax1.imshow(vis_left_gray)
+                        # ax1.title.set_text('Real Image')
+                        ax1.set_xticklabels([])
+                        ax1.set_yticklabels([])
+                        ax1.axis('off')
+
+                        ax2 = plt.subplot(gs[0, 1])
+                        ax2.imshow(vis_right_gray)
+                        # ax2.title.set_text('Fake Image')
+                        ax2.set_xticklabels([])
+                        ax2.set_yticklabels([])
+                        ax2.axis('off')
+
+                        ax3 = plt.subplot(gs[0, 2])
+                        ax3.imshow(vis_mouth_gray)
+                        # ax3.title.set_text('Fake Image')
+                        ax3.set_xticklabels([])
+                        ax3.set_yticklabels([])
+                        ax3.axis('off')
+
+                        ax4 = plt.subplot(gs[1, 0])
+                        ax4.imshow(vis_left_fake)
+                        # ax2.title.set_text('Fake Image')
+                        ax4.set_xticklabels([])
+                        ax4.set_yticklabels([])
+                        ax4.axis('off')
+
+                        ax5 = plt.subplot(gs[1, 1])
+                        ax5.imshow(vis_right_fake)
+                        # ax2.title.set_text('Fake Image')
+                        ax5.set_xticklabels([])
+                        ax5.set_yticklabels([])
+                        ax5.axis('off')
+
+                        ax6 = plt.subplot(gs[1, 2])
+                        ax6.imshow(vis_mouth_fake)
+                        # ax2.title.set_text('Fake Image')
+                        ax6.set_xticklabels([])
+                        ax6.set_yticklabels([])
+                        ax6.axis('off')
+
+                        ax7 = plt.subplot(gs[2, 0])
+                        ax7.imshow(vis_left_gt)
+                        # ax7.title.set_text('Fake Image')
+                        ax7.set_xticklabels([])
+                        ax7.set_yticklabels([])
+                        ax7.axis('off')
+
+                        ax8 = plt.subplot(gs[2, 1])
+                        ax8.imshow(vis_right_gt)
+                        # ax8.title.set_text('Fake Image')
+                        ax8.set_xticklabels([])
+                        ax8.set_yticklabels([])
+                        ax8.axis('off')
+
+                        ax9 = plt.subplot(gs[2, 2])
+                        ax9.imshow(vis_mouth_gt)
+                        # ax2.title.set_text('Fake Image')
+                        ax9.set_xticklabels([])
+                        ax9.set_yticklabels([])
+                        ax9.axis('off')
+                        writer.add_figure('train_figs'+str(i), fig)
                 
-            #     # Right fake image
-            #     temp_right_fake = right_fake.detach()
-            #     vis_right_fake = tensor2image(temp_right_fake)
-            #     vis_right_fake = (vis_right_fake+1)/2.
-
-            #     # Mouth gray image
-            #     temp_mouth_gray = mouth_gray.detach()
-            #     vis_mouth_gray = tensor2image(temp_mouth_gray)
-            #     vis_mouth_gray = (vis_mouth_gray+1)/2.
-                
-            #     # Mouth gt image
-            #     temp_mouth_gt = mouth_gt.detach()
-            #     vis_mouth_gt = tensor2image(temp_mouth_gt)
-            #     vis_mouth_gt = (vis_mouth_gt+1)/2.
-
-            #     # Mouth fake image
-            #     temp_mouth_fake = mouth_fake.detach()
-            #     vis_mouth_fake = tensor2image(temp_mouth_fake)
-            #     vis_mouth_fake = (vis_mouth_fake+1)/2.
-
-            #     print('Writing losses to tensorboard...')
-            #     writer.add_scalar('train/left_rec_loss', left_rec_loss, i)
-            #     writer.add_scalar('train/left_percept_loss', left_perceptual_loss, i)
-            #     writer.add_scalar('train/right_rec_loss', right_rec_loss, i)
-            #     writer.add_scalar('train/right_percept_loss', right_perceptual_loss, i)
-            #     writer.add_scalar('train/mouth_rec_loss', mouth_rec_loss, i)
-            #     writer.add_scalar('train/mouth_percept_loss', mouth_perceptual_loss, i)
-
-            #     log_imgs_every = 5
-            #     if i%log_imgs_every == 0:
-            #         nrow = 3
-            #         ncol = 3
-            #         fig = plt.figure(figsize=(10, 10))
-            #         gs = gridspec.GridSpec(nrow, ncol,
-            #                                         wspace=0.1, hspace=0.0, 
-            #                                         top=1.-0.5/(nrow+1), bottom=0.5/(nrow+1), 
-            #                                         left=0.5/(ncol+1), right=1-0.5/(ncol+1))
-            #         ax1 = plt.subplot(gs[0, 0])
-            #         ax1.imshow(vis_left_gray)
-            #         # ax1.title.set_text('Real Image')
-            #         ax1.set_xticklabels([])
-            #         ax1.set_yticklabels([])
-            #         ax1.axis('off')
-
-            #         ax2 = plt.subplot(gs[0, 1])
-            #         ax2.imshow(vis_right_gray)
-            #         # ax2.title.set_text('Fake Image')
-            #         ax2.set_xticklabels([])
-            #         ax2.set_yticklabels([])
-            #         ax2.axis('off')
-
-            #         ax3 = plt.subplot(gs[0, 2])
-            #         ax3.imshow(vis_mouth_gray)
-            #         # ax3.title.set_text('Fake Image')
-            #         ax3.set_xticklabels([])
-            #         ax3.set_yticklabels([])
-            #         ax3.axis('off')
-
-            #         ax4 = plt.subplot(gs[1, 0])
-            #         ax4.imshow(vis_left_fake)
-            #         # ax2.title.set_text('Fake Image')
-            #         ax4.set_xticklabels([])
-            #         ax4.set_yticklabels([])
-            #         ax4.axis('off')
-
-            #         ax5 = plt.subplot(gs[1, 1])
-            #         ax5.imshow(vis_right_fake)
-            #         # ax2.title.set_text('Fake Image')
-            #         ax5.set_xticklabels([])
-            #         ax5.set_yticklabels([])
-            #         ax5.axis('off')
-
-            #         ax6 = plt.subplot(gs[1, 2])
-            #         ax6.imshow(vis_mouth_fake)
-            #         # ax2.title.set_text('Fake Image')
-            #         ax6.set_xticklabels([])
-            #         ax6.set_yticklabels([])
-            #         ax6.axis('off')
-
-            #         ax7 = plt.subplot(gs[2, 0])
-            #         ax7.imshow(vis_left_gt)
-            #         # ax7.title.set_text('Fake Image')
-            #         ax7.set_xticklabels([])
-            #         ax7.set_yticklabels([])
-            #         ax7.axis('off')
-
-            #         ax8 = plt.subplot(gs[2, 1])
-            #         ax8.imshow(vis_right_gt)
-            #         # ax8.title.set_text('Fake Image')
-            #         ax8.set_xticklabels([])
-            #         ax8.set_yticklabels([])
-            #         ax8.axis('off')
-
-            #         ax9 = plt.subplot(gs[2, 2])
-            #         ax9.imshow(vis_mouth_gt)
-            #         # ax2.title.set_text('Fake Image')
-            #         ax9.set_xticklabels([])
-            #         ax9.set_yticklabels([])
-            #         ax9.axis('off')
-            #         writer.add_figure('train_figs'+str(i), fig)
-            
-            # if i%args.save_network_interval == 0:
-            #     torch.save(
-            #         {
-            #             "local_pathway_left_eye": model.module.local_pathway_left_eye.state_dict(),
-            #             "local_pathway_right_eye": model.module.local_pathway_right_eye.state_dict(),
-            #             "local_pathway_mouth": model.module.local_pathway_mouth.state_dict(),
-            #             "train_args": args,
-            #             "cfg": cfg,
-            #         },
-            #         f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
-            #     )
+                if i%args.save_network_interval == 0:
+                    torch.save(
+                        {
+                            "local_pathway_left_eye": model.module.local_pathway_left_eye.state_dict(),
+                            "local_pathway_right_eye": model.module.local_pathway_right_eye.state_dict(),
+                            "local_pathway_mouth": model.module.local_pathway_mouth.state_dict(),
+                            "train_args": args,
+                            "cfg": cfg,
+                        },
+                        f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
+                    )
         else:
             # Here stylecode is from noise z; fake_stylecode is from encoder
             # adv_loss, w_rec_loss, stylecode, fake_stylecode, fake_img = model(None, "G")
@@ -1187,7 +1232,7 @@ if __name__ == "__main__":
             "lsun/bedroom",
         ],
     )
-    parser.add_argument("--iter", type=int, default=5000) # 5000 training iters in total
+    parser.add_argument("--iter", type=int, default=2500) # 5000 training iters in total
     parser.add_argument("--save_network_interval", type=int, default=1000) # Save the checkpoint every 50 iters
     parser.add_argument("--small_generator", action="store_true")
     parser.add_argument("--batch", type=int, default=8, help="total batch sizes")

@@ -5,8 +5,9 @@ from PIL import Image
 import os
 
 class BaseDataset(data.Dataset):
-    def __init__(self, list_path, set_, data_name, image_size, labels_size, mean=(128, 128, 128)):
+    def __init__(self, is_global, list_path, set_, data_name, image_size, labels_size, mean=(128, 128, 128)):
         self.set = set_
+        self.is_global = is_global
         self.data_name = data_name
         self.list_path = list_path
         self.image_size = image_size
@@ -16,7 +17,9 @@ class BaseDataset(data.Dataset):
             self.labels_size = labels_size
         self.mean_rgb = mean
         self.mean_gray = mean[0]
-        list_file_name = self.set + '.txt'
+        # list_file_name = self.set + '.txt'
+        list_file_name = self.set + '_1.txt' # Remove the exp of sad from the training data
+        
         list_file_path = os.path.join(self.list_path, list_file_name)
 
         with open(list_file_path) as f:
@@ -32,19 +35,20 @@ class BaseDataset(data.Dataset):
             right_gray_patch_file = os.path.join(name, 'right_patch_gray_angle.png')
             mouth_gray_patch_file = os.path.join(name, 'mouth_patch_gray_angle.png')
 
-            # left_rgb_gt_file = os.path.join(name, 'left_patch_rgb_gt.png')
-            # right_rgb_gt_file = os.path.join(name, 'right_patch_rgb_gt.png')
-            # mouth_rgb_gt_file = os.path.join(name, 'mouth_patch_rgb_gt.png')
+            left_rgb_gt_file = os.path.join(name, 'left_patch_rgb_gt.png')
+            right_rgb_gt_file = os.path.join(name, 'right_patch_rgb_gt.png')
+            mouth_rgb_gt_file = os.path.join(name, 'mouth_patch_rgb_gt.png')
 
             mask_file = os.path.join(name, 'mask.npy')
 
-            self.files.append((ref_file, overlaid_file, label_file, 
+            if self.is_global:
+                self.files.append((ref_file, overlaid_file, label_file, 
                                 left_gray_patch_file, right_gray_patch_file, mouth_gray_patch_file, 
                                 mask_file, name))
-
-            # self.files.append((img_file, label_file, 
-            #                     left_gray_patch_file, right_gray_patch_file, mouth_gray_patch_file,
-            #                     left_rgb_gt_file, right_rgb_gt_file, mouth_rgb_gt_file, name))
+            else:
+                self.files.append((ref_file, overlaid_file, label_file, 
+                                    left_gray_patch_file, right_gray_patch_file, mouth_gray_patch_file,
+                                    left_rgb_gt_file, right_rgb_gt_file, mouth_rgb_gt_file, mask_file, name))
 
         # if max_iters is not None:
         #     self.img_ids = self.img_ids * int(np.ceil(float(max_iters) / len(self.img_ids))) # ???
