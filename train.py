@@ -205,6 +205,7 @@ class DDPModel(nn.Module):
                     self.global_gray_ae = LocalPathway(self.is_gray, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
                 else: # Using rgb global image
                     self.global_rgb_ae = LocalPathway(self.is_gray, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+                    self.global_ema = LocalPathway(self.is_gray, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
                     self.ae_discriminator = Discriminator(
                         args.size, channel_multiplier=args.channel_multiplier
                     )
@@ -323,7 +324,7 @@ class DDPModel(nn.Module):
             global_side_rec_loss = self.mse_loss(global_gray_gt, global_side_fake)
             global_side_perceptual_loss = self.percept(global_gray_gt, global_side_fake).mean()
             return global_side_fake, global_side_feature, global_side_rec_loss, global_side_perceptual_loss
-        elif mode == 'global_rgb_ae':
+        elif mode == 'global_rgb_ae_ad':
             # Input is the overlaid image with the raw side patches
             global_side_rgb = real_img[0]
             global_rgb_gt = real_img[1]
@@ -334,6 +335,15 @@ class DDPModel(nn.Module):
             global_side_rec_loss = self.mse_loss(global_rgb_gt, global_side_fake)
             global_side_perceptual_loss = self.percept(global_rgb_gt, global_side_fake).mean()
             return global_side_fake, global_side_feature, global_side_rec_loss, global_side_perceptual_loss, global_adv_loss
+        elif mode == 'global_rgb_ae':
+            global_side_rgb = real_img[0]
+            global_rgb_gt = real_img[1]
+            
+            global_side_fake, global_side_feature = self.global_rgb_ae(global_side_rgb)
+            global_side_rec_loss = self.mse_loss(global_rgb_gt, global_side_fake)
+            global_side_perceptual_loss = self.percept(global_rgb_gt, global_side_fake).mean()
+
+            return global_side_fake, global_side_feature, global_side_rec_loss, global_side_perceptual_loss
         elif mode == 'ae_D':
             global_side_rgb, global_rgb_gt = real_img[0], real_img[1]
             with torch.no_grad():
@@ -344,6 +354,16 @@ class DDPModel(nn.Module):
             d_loss = d_logistic_loss(real_pred, fake_pred)
 
             return d_loss, real_pred.mean(), fake_pred.mean()
+        elif mode == 'ae_D_reg':
+            global_side_rgb, global_rgb_gt = real_img[0], real_img[1]
+            global_rgb_gt.requires_grad = True
+            real_pred = self.ae_discriminator(global_rgb_gt)
+            r1_loss = d_r1_loss(real_pred, global_rgb_gt)
+            d_reg_loss = (
+                self.args.r1 / 2 * r1_loss * self.args.d_reg_every + 0 * real_pred[0]
+            )
+
+            return d_reg_loss, r1_loss
             
 def run(ddp_fn, world_size, args):
     print("world size", world_size)
@@ -442,6 +462,11 @@ def ddp_main(rank, world_size, args):
                     lr = cfg.TRAIN.GLOBAL_AE_LR
                 )
             else:
+                global_module = model.module.global_rgb_ae
+                global_ema_module = model.module.global_ema
+                global_ema_module.eval()
+                accumulate(global_ema_module, global_module, 0)
+
                 global_rgb_ae_optim = optim.Adam(
                     model.module.global_rgb_ae.parameters(),
                     lr = cfg.TRAIN.GLOBAL_AE_LR
@@ -480,6 +505,9 @@ def ddp_main(rank, world_size, args):
             else:
                 model.module.global_rgb_ae.load_state_dict(ckpt["global_rgb_ae"])
                 model.module.ae_discriminator.load_state_dict(ckpt["ae_discriminator"])
+                model.module.global_ema.load_state_dict(ckpt['global_ema'])
+                global_rgb_ae_optim.load_state_dict(ckpt['global_rgb_ae_optim'])
+                ae_d_optim.load_state_dict(ckpt['ae_d_optim'])
         else:
             model.module.generator.load_state_dict(ckpt["generator"])
             model.module.discriminator.load_state_dict(ckpt["discriminator"])
@@ -510,6 +538,7 @@ def ddp_main(rank, world_size, args):
         val_dataset = MultiResolutionDataset(args.val_lmdb, transform, args.size)
     else:
         train_dataset = FDCDataset(is_global, list_path=args.list_path, set='train')
+        # val_dataset = FDCDataset(is_global, list_path=args.list_path, set='val')
 
     if is_celeba:
         print(f"train_dataset: {len(train_dataset)}, val_dataset: {len(val_dataset)}")
@@ -601,13 +630,13 @@ def ddp_main(rank, world_size, args):
                 batch_list = train_iter.__next__()
                 temp_batch = batch_list[1]
 
-                overlaid_rgb, overlaid_gray, gt_rgb, gt_gray, _, _ = temp_batch
+                overlaid_rgb, gt_rgb, mask = temp_batch
 
                 overlaid_rgb = overlaid_rgb.to(map_location)
-                overlaid_gray = overlaid_gray.to(map_location)
+                # overlaid_gray = overlaid_gray.to(map_location)
                 gt_rgb = gt_rgb.to(map_location)
-                gt_gray = gt_gray.to(map_location)
-                if overlaid_gray.shape[0] != args.batch:
+                # gt_gray = gt_gray.to(map_location)
+                if overlaid_rgb.shape[0] != args.batch:
                     print(f'Data batch wrong---{real_img.shape[0]}, continue...')
                     continue
             else:
@@ -664,38 +693,79 @@ def ddp_main(rank, world_size, args):
                     global_gray_loss.backward()
                     global_gray_ae_optim.step()
                 else: # RGB global input
-                    # Adv and gt training for the AE generator
-                    global_rgb_input = [overlaid_rgb, gt_rgb]
-                    global_rgb_fake, global_rgb_feature, global_rgb_rec_loss, global_rgb_perceptual_loss, global_adv_loss = model(global_rgb_input, 'global_rgb_ae')
-                    global_input = overlaid_rgb
-                    global_fake = global_rgb_fake
-                    global_feature = global_rgb_feature
-                    global_rec_loss = global_rgb_rec_loss
-                    global_perceptual_loss = global_rgb_perceptual_loss
-                    global_gt = gt_rgb
+                    if i > args.ae_switch_iter: # MAE+AD training
+                        global_rgb_input = [overlaid_rgb, gt_rgb]
+                        global_rgb_fake, global_rgb_feature, global_rgb_rec_loss, global_rgb_perceptual_loss, global_adv_loss = model(global_rgb_input, 'global_rgb_ae_ad')
+                        global_input = overlaid_rgb
+                        global_fake = global_rgb_fake
+                        global_feature = global_rgb_feature
+                        global_rec_loss = global_rgb_rec_loss
+                        global_perceptual_loss = global_rgb_perceptual_loss
+                        global_gt = gt_rgb
 
-                    global_rgb_ae_optim.zero_grad()
-                    global_rgb_loss = (global_rec_loss*args.lambda_x_rec_loss + 
-                                        global_perceptual_loss*args.lambda_perceptual_loss + 
-                                        global_adv_loss*args.lambda_adv_loss)
-                    global_rgb_loss.backward()
-                    global_rgb_ae_optim.step()
+                        print('global_rec_loss" ', global_rec_loss)
+                        print('percept loss: ', global_perceptual_loss)
+                        print('global_adv_loss: ', global_adv_loss)
+                        
+                        global_rgb_ae_optim.zero_grad()
+                        global_rgb_loss = (global_rec_loss*args.lambda_x_rec_loss + 
+                                            global_perceptual_loss*args.lambda_perceptual_loss + 
+                                            global_adv_loss*args.lambda_adv_loss)
 
-                    # ae_D adv
-                    requires_grad(model.module.ae_discriminator, True)
-                    ae_d_loss, real_score, fake_score = model(global_rgb_input, "ae_D")
-                    ae_d_loss = ae_d_loss.mean()
-                    ae_d_optim.zero_grad()
-                    ae_d_loss.backward()
-                    ae_d_optim.step()
+                        global_rgb_loss.backward()
+                        gather_grad(
+                            global_module.parameters(), world_size
+                        )
+                        global_rgb_ae_optim.step()
+
+                        # ae_D adv
+                        requires_grad(model.module.ae_discriminator, True)
+                        ae_d_loss, real_score, fake_score = model(global_rgb_input, "ae_D")
+                        ae_d_loss = ae_d_loss.mean()
+                        ae_d_optim.zero_grad()
+                        ae_d_loss.backward()
+                        ae_d_optim.step()
+                        real_score_val = real_score.item()
+                        fake_score_val = fake_score.item()
+
+                        d_regularize = i % args.d_reg_every == 0
+                        if d_regularize:
+                            d_reg_loss, r1_loss = model(global_rgb_input, 'ae_D_reg')
+                            d_reg_loss = d_reg_loss.mean()
+                            d_reg_loss_val = d_reg_loss.item()
+                            ae_d_optim.zero_grad()
+                            d_reg_loss.backward()
+                            ae_d_optim.step()
+                            r1_val = r1_loss.mean().item()
+                    else: # MSE-only training
+                        global_rgb_input = [overlaid_rgb, gt_rgb]
+                        global_rgb_fake, global_rgb_feature, global_rgb_rec_loss, global_rgb_perceptual_loss = model(global_rgb_input, 'global_rgb_ae')
+                        global_input = overlaid_rgb
+                        global_fake = global_rgb_fake
+                        global_feature = global_rgb_feature
+                        global_rec_loss = global_rgb_rec_loss
+                        global_perceptual_loss = global_rgb_perceptual_loss
+                        global_gt = gt_rgb
+
+                        global_rgb_ae_optim.zero_grad()
+                        global_rgb_loss = (global_rec_loss*args.lambda_x_rec_loss + 
+                                            global_perceptual_loss*args.lambda_perceptual_loss)
+
+                        global_rgb_loss.backward()
+                        global_rgb_ae_optim.step()
+                        
+                        global_adv_loss = 0
+                        ae_d_loss = 0
+                        real_score_val = 0
+                        fake_score_val = 0
 
                 print('Writing losses to tensorboard...')
                 writer.add_scalar('train/global_rec_loss', global_rec_loss, i)
                 writer.add_scalar('train/global_percept_loss', global_perceptual_loss, i)
                 writer.add_scalar('train/global_adv_loss', global_adv_loss, i)
                 writer.add_scalar('train/ae_d_loss', ae_d_loss, i)
-                writer.add_scalar('train/real_score', real_score.item(), i)
-                writer.add_scalar('train/fake_score', fake_score.item(), i)
+                writer.add_scalar('train/real_score', real_score_val, i)
+                writer.add_scalar('train/fake_score', fake_score_val, i)
 
                 log_imgs_every = 5
                 if i%log_imgs_every == 0:
@@ -740,7 +810,7 @@ def ddp_main(rank, world_size, args):
                     ax3.set_yticklabels([])
                     ax3.axis('off')
                     writer.add_figure('train_figs'+str(i), fig)
-                if i%args.save_network_interval == 0:
+                if (i+1)%args.save_network_interval == 0:
                     if is_gray: # Save the global gray ae model
                         torch.save(
                         {
@@ -748,16 +818,20 @@ def ddp_main(rank, world_size, args):
                             "train_args": args,
                             "cfg": cfg,
                         },
-                        f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
+                        f"{save_dir}/checkpoints/{args.suffix}/{str(i).zfill(6)}.pt",
                     )
                     else: # Save the global rgb model
                         torch.save(
                         {
                             "global_rgb_ae": model.module.global_rgb_ae.state_dict(),
+                            "ae_discriminator": model.module.ae_discriminator.state_dict(),
+                            "global_ema": model.module.global_ema.state_dict(),
+                            "global_rgb_ae_optim": global_rgb_ae_optim,
+                            "ae_d_optim": ae_d_optim,
                             "train_args": args,
                             "cfg": cfg,
                         },
-                        f"{save_dir}/checkpoints/{str(i).zfill(6)}.pt",
+                        f"{save_dir}/checkpoints/{args.suffix}/{str(i).zfill(6)}.pt",
                     )
             else:
                 left_model_input = [left_gray, left_gt]
@@ -1273,7 +1347,8 @@ if __name__ == "__main__":
             "lsun/bedroom",
         ],
     )
-    parser.add_argument("--iter", type=int, default=5000) # 5000 training iters in total
+    parser.add_argument("--iter", type=int, default=15000) # 5000 training iters in total
+    parser.add_argument("--ae_switch_iter", type=int, default=0) # MSE -> MSE+AD 
     parser.add_argument("--save_network_interval", type=int, default=1000) # Save the checkpoint every 50 iters
     parser.add_argument("--small_generator", action="store_true")
     parser.add_argument("--batch", type=int, default=8, help="total batch sizes")
@@ -1294,11 +1369,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--mapping_layer_num", type=int, default=8)
 
-    parser.add_argument("--lambda_x_rec_loss", type=float, default=1)
-    parser.add_argument("--lambda_adv_loss", type=float, default=1)
+    parser.add_argument("--lambda_x_rec_loss", type=float, default=1000)
+    parser.add_argument("--lambda_adv_loss", type=float, default=0.1)
     parser.add_argument("--lambda_w_rec_loss", type=float, default=1)
     parser.add_argument("--lambda_d_loss", type=float, default=1)
-    parser.add_argument("--lambda_perceptual_loss", type=float, default=0.1)
+    parser.add_argument("--lambda_perceptual_loss", type=float, default=1)
     parser.add_argument("--lambda_indomainGAN_D_loss", type=float, default=1)
     parser.add_argument("--lambda_indomainGAN_E_loss", type=float, default=0.01)
 

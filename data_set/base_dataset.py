@@ -17,17 +17,13 @@ class BaseDataset(data.Dataset):
             self.labels_size = labels_size
         self.mean_rgb = mean
         self.mean_gray = mean[0]
-        # list_file_name = self.set + '.txt'
-        list_file_name = self.set + '_1.txt' # Remove the exp of sad from the training data
-        
+        list_file_name = self.set + '.txt'        
         list_file_path = os.path.join(self.list_path, list_file_name)
 
         with open(list_file_path) as f:
             self.img_ids = [i_id.strip() for i_id in f]
         self.files = []
         for name in self.img_ids:
-            # img_file = os.path.join(name, 'overlaid.png')
-            ref_file = os.path.join(name, 'reference.png')
             overlaid_file = os.path.join(name, 'overlaid.png')
             label_file = os.path.join(name, 'gt.png')
             
@@ -42,11 +38,11 @@ class BaseDataset(data.Dataset):
             mask_file = os.path.join(name, 'mask.npy')
 
             if self.is_global:
-                self.files.append((ref_file, overlaid_file, label_file, 
+                self.files.append((overlaid_file, label_file, 
                                 left_gray_patch_file, right_gray_patch_file, mouth_gray_patch_file, 
                                 mask_file, name))
             else:
-                self.files.append((ref_file, overlaid_file, label_file, 
+                self.files.append((overlaid_file, label_file, 
                                     left_gray_patch_file, right_gray_patch_file, mouth_gray_patch_file,
                                     left_rgb_gt_file, right_rgb_gt_file, mouth_rgb_gt_file, mask_file, name))
 

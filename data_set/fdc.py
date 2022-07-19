@@ -12,18 +12,18 @@ class FDCDataset(BaseDataset):
 
     def __getitem__(self, index):
         if self.is_global:
-            ref_file, overlaid_file, gt_file, left_gray_patch_file, right_gray_patch_file, mouth_gray_patch_file, mask_file, name = self.files[index]
+            overlaid_file, gt_file, left_gray_patch_file, right_gray_patch_file, mouth_gray_patch_file, mask_file, name = self.files[index]
             
             # Convert to rgb and resize the image
             # Return a pillow image
-            ref_rgb = self.get_image(ref_file)
-            ref_gray = ref_rgb.convert('L')
-            ref_rgb_np = np.asarray(ref_rgb, np.float32)
-            ref_rgb_np = self.preprocess_rgb(ref_rgb_np)
+            # ref_rgb = self.get_image(ref_file)
+            # ref_gray = ref_rgb.convert('L')
+            # ref_rgb_np = np.asarray(ref_rgb, np.float32)
+            # ref_rgb_np = self.preprocess_rgb(ref_rgb_np)
             
-            ref_gray_np = np.asarray(ref_gray, np.float32)
-            ref_gray_np = ref_gray_np[..., np.newaxis]
-            ref_gray_np = self.preprocess_gray(ref_gray_np)
+            # ref_gray_np = np.asarray(ref_gray, np.float32)
+            # ref_gray_np = ref_gray_np[..., np.newaxis]
+            # ref_gray_np = self.preprocess_gray(ref_gray_np)
             
             overlaid_rgb = self.get_image(overlaid_file)
             overlaid_rgb_np = np.asarray(overlaid_rgb, np.float32)
@@ -94,7 +94,8 @@ class FDCDataset(BaseDataset):
             mouth_gray_np = self.preprocess_rgb(mouth_gray_np)
 
             # return ref_rgb_np.copy(), ref_gray_np.copy(), overlaid_gray_np.copy(), gt_rgb_np.copy(), gt_gray_np.copy(), mask_np.copy(), left_gray_np.copy(), right_gray_np.copy(), mouth_gray_np.copy(), np.array(ref_rgb_np.shape), name
-            return overlaid_rgb_np.copy(), overlaid_gray_np.copy(), gt_rgb_np.copy(), gt_gray_np.copy(), np.array(ref_rgb_np.shape), name
+            # return overlaid_rgb_np.copy(), overlaid_gray_np.copy(), gt_rgb_np.copy(), gt_gray_np.copy(), np.array(ref_rgb_np.shape), name
+            return overlaid_rgb_np.copy(), gt_rgb_np.copy(), mask_np.copy()
         else:
             # Label is the gt rgb image
             ref_file, img_file, label_file, left_gray_file, right_gray_file, mouth_gray_file, left_rgb_file, right_rgb_file, mouth_rgb_file, mask_file, name = self.files[index]
