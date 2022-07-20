@@ -1177,12 +1177,13 @@ from training.fdc_utils import elementwise_mult_cast_int as emci
 from training.fdc_layers import *
 
 class LocalPathway(nn.Module):
-    def __init__(self, is_gray, use_batchnorm=True, feature_layer_dim=64, fm_mult=1.0):
+    def __init__(self, is_gray, use_batchnorm=True, is_skip=False, feature_layer_dim=64, fm_mult=1.0):
         super(LocalPathway, self).__init__()
         n_fm_encoder = [64, 128, 256, 512]
         n_fm_decoder = [256, 128]
         n_fm_encoder = emci(n_fm_encoder, fm_mult)
         n_fm_decoder = emci(n_fm_decoder, fm_mult)
+        self.is_skip = is_skip
 
         # Encoder
         if not is_gray:
@@ -1193,31 +1194,63 @@ class LocalPathway(nn.Module):
         self.conv2 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
         self.conv3 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
 
+        self.conv0_1 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        self.conv1_1 = sequential(conv(n_fm_encoder[0], n_fm_encoder[1], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[1], activation=nn.LeakyReLU()))
+        self.conv2_1 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
+        self.conv3_1 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
+
         # Decoder
-        self.deconv0 = deconv(n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
-        self.after_select0 = sequential(conv(n_fm_decoder[0] + self.conv2.out_channels, n_fm_decoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[0], activation=nn.LeakyReLU()))
+        if is_skip:
+            self.deconv0 = deconv(2*n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select0 = sequential(conv(n_fm_decoder[0] + self.conv2.out_channels, n_fm_decoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[0], activation=nn.LeakyReLU()))
 
-        self.deconv1 = deconv(self.after_select0.out_channels, n_fm_decoder[1], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
-        self.after_select1 = sequential(conv(n_fm_decoder[1]+self.conv1.out_channels, n_fm_decoder[1], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[1], activation=nn.LeakyReLU()))
+            self.deconv1 = deconv(self.after_select0.out_channels, n_fm_decoder[1], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select1 = sequential(conv(n_fm_decoder[1]+self.conv1.out_channels, n_fm_decoder[1], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[1], activation=nn.LeakyReLU()))
 
-        self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
-        self.after_select2 = sequential(conv(feature_layer_dim+self.conv0.out_channels, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
+            self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select2 = sequential(conv(feature_layer_dim+self.conv0.out_channels, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
+        else:
+            self.deconv0 = deconv(2*n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select0 = sequential(conv(n_fm_decoder[0] + 0, n_fm_decoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[0], activation=nn.LeakyReLU()))
+
+            self.deconv1 = deconv(self.after_select0.out_channels, n_fm_decoder[1], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select1 = sequential(conv(n_fm_decoder[1]+0, n_fm_decoder[1], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[1], activation=nn.LeakyReLU()))
+
+            self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select2 = sequential(conv(feature_layer_dim+0, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
+        
         if not is_gray:
             self.local_img = conv(feature_layer_dim, 3, 1, 1, 0, None, None, False)
         else:
             self.local_img = conv(feature_layer_dim, 1, 1, 1, 0, None, None, False)
 
-    def forward(self, x):
+    def forward(self, x, x_1):
         conv0 = self.conv0(x)
         conv1 = self.conv1(conv0)
         conv2 = self.conv2(conv1)
         conv3 = self.conv3(conv2)
-        deconv0 = self.deconv0(conv3)
-        after_select0 = self.after_select0(torch.cat([deconv0, conv2], 1))
-        deconv1 = self.deconv1(after_select0)
-        after_select1 = self.after_select1(torch.cat([deconv1, conv1], 1))
-        deconv2 = self.deconv2(after_select1)
-        after_select2 = self.after_select2(torch.cat([deconv2, conv0], 1))
+    
+        conv0_1 = self.conv0_1(x_1)
+        conv1_1 = self.conv1_1(conv0_1)
+        conv2_1 = self.conv2_1(conv1_1)
+        conv3_1 = self.conv3_1(conv2_1)
+
+        out = torch.cat((conv3, conv3_1), dim=1)
+
+        if self.is_skip:
+            deconv0 = self.deconv0(out)
+            after_select0 = self.after_select0(torch.cat([deconv0, conv2], 1))
+            deconv1 = self.deconv1(after_select0)
+            after_select1 = self.after_select1(torch.cat([deconv1, conv1], 1))
+            deconv2 = self.deconv2(after_select1)
+            after_select2 = self.after_select2(torch.cat([deconv2, conv0], 1))
+        else:
+            deconv0 = self.deconv0(out)
+            after_select0 = self.after_select0(deconv0)
+            deconv1 = self.deconv1(after_select0)
+            after_select1 = self.after_select1(deconv1)
+            deconv2 = self.deconv2(after_select1)
+            after_select2 = self.after_select2(deconv2)
 
         # print('conv0 shape: ', conv0.shape)
         # print('conv1 shape: ', conv1.shape)

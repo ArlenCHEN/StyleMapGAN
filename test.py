@@ -70,6 +70,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", type=str, default='test')
     parser.add_argument("--input_name", type=str, default='overlaid.png')
     parser.add_argument("--gt_name", type=str, default='gt.png')
+    parser.add_argument("--ref_name", type=str, default='reference.png')
     parser.add_argument("--image_size", type=int, default=256)
     args = parser.parse_args()
 
@@ -137,6 +138,11 @@ if __name__ == "__main__":
     input_img = input_img.resize((args.image_size, args.image_size), Image.BICUBIC)
     input_img = np.asarray(input_img, np.float32)
 
+    ref_img = Image.open(os.path.join(args.img_path, args.ref_name))
+    ref_img = ref_img.convert('RGB')
+    ref_img = ref_img.resize((args.image_size, args.image_size), Image.BICUBIC)
+    ref_img = np.asarray(ref_img, np.float32)
+
     gt_img = Image.open(os.path.join(args.img_path, args.gt_name))
     gt_img = gt_img.convert('RGB')
     gt_img = gt_img.resize((args.image_size, args.image_size), Image.BICUBIC)
@@ -147,6 +153,10 @@ if __name__ == "__main__":
     input_img = input_img/128.
     input_img = input_img.transpose((2,0,1))
 
+    ref_img -= mean_rgb
+    ref_img = ref_img/128.
+    ref_img = ref_img.transpose((2,0,1))
+
     gt_img -= mean_rgb
     gt_img = gt_img/128.
     gt_img = gt_img.transpose((2,0,1))
@@ -154,6 +164,10 @@ if __name__ == "__main__":
     input_img = torch.tensor(input_img)
     input_img = input_img.unsqueeze(0)
     input_img = input_img.to(device)
+
+    ref_img = torch.tensor(ref_img)
+    ref_img = ref_img.unsqueeze(0)
+    ref_img = ref_img.to(device)
 
     gt_img = torch.tensor(gt_img)
     gt_img = gt_img.unsqueeze(0)
@@ -165,7 +179,7 @@ if __name__ == "__main__":
                 fake_gray_global_img, fake_gray_global_feature = global_gray_ae(input_img)
                 fake_img = fake_gray_global_img
             else:
-                fake_rgb_global_img, fake_rgb_global_feature = global_rgb_ae(input_img)
+                fake_rgb_global_img, fake_rgb_global_feature = global_rgb_ae(input_img, ref_img)
                 fake_img = fake_rgb_global_img
         else:
             pass

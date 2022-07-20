@@ -24,6 +24,7 @@ class BaseDataset(data.Dataset):
             self.img_ids = [i_id.strip() for i_id in f]
         self.files = []
         for name in self.img_ids:
+            reference_file = os.path.join(name, 'reference.png')
             overlaid_file = os.path.join(name, 'overlaid.png')
             label_file = os.path.join(name, 'gt.png')
             
@@ -38,11 +39,11 @@ class BaseDataset(data.Dataset):
             mask_file = os.path.join(name, 'mask.npy')
 
             if self.is_global:
-                self.files.append((overlaid_file, label_file, 
+                self.files.append((reference_file, overlaid_file, label_file, 
                                 left_gray_patch_file, right_gray_patch_file, mouth_gray_patch_file, 
                                 mask_file, name))
             else:
-                self.files.append((overlaid_file, label_file, 
+                self.files.append((reference_file, overlaid_file, label_file, 
                                     left_gray_patch_file, right_gray_patch_file, mouth_gray_patch_file,
                                     left_rgb_gt_file, right_rgb_gt_file, mouth_rgb_gt_file, mask_file, name))
 
