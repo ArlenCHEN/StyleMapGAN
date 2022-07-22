@@ -386,7 +386,7 @@ def ddp_main(rank, world_size, args):
     is_tensorboard = True
     # is_gray_2_rgb = True
 
-    is_ae = True # Use autoencoder structure
+    is_ae = False # Use autoencoder structure
     is_gray = False # Is the input image grayscale or rgb?
     is_global = True # Is the input small patch or a whole face
 
