@@ -96,43 +96,51 @@ class FDCDataset(BaseDataset):
             # return ref_rgb_np.copy(), ref_gray_np.copy(), overlaid_gray_np.copy(), gt_rgb_np.copy(), gt_gray_np.copy(), mask_np.copy(), left_gray_np.copy(), right_gray_np.copy(), mouth_gray_np.copy(), np.array(ref_rgb_np.shape), name
             # return overlaid_rgb_np.copy(), overlaid_gray_np.copy(), gt_rgb_np.copy(), gt_gray_np.copy(), np.array(ref_rgb_np.shape), name
             return ref_rgb_np.copy(), overlaid_rgb_np.copy(), gt_rgb_np.copy(), mask_np.copy()
-        else:
-            # Label is the gt rgb image
-            ref_file, img_file, label_file, left_gray_file, right_gray_file, mouth_gray_file, left_rgb_file, right_rgb_file, mouth_rgb_file, mask_file, name = self.files[index]
+        else: # Local based method
+            ref_file, gt_file, left_gray_file, left_rgb_gt_file, right_gray_file, right_rgb_gt_file, mouth_gray_file, mouth_rgb_gt_file, mask_file, name = self.files[index]
 
             ref_rgb = self.get_image(ref_file)
             ref_gray = ref_rgb.convert('L')
             ref_rgb_np = np.asarray(ref_rgb, np.float32)
-            ref_rgb_np = self.preprocess_rgb(ref_rgb_np)
+            ref_rgb_np = self.preprocess_rgb(ref_rgb_np) # Return this
             
             ref_gray_np = np.asarray(ref_gray, np.float32)
-            ref_gray_np = ref_gray_np[..., np.newaxis]
-            ref_gray_np = self.preprocess_gray(ref_gray_np)
+            ref_gray_np = self.preprocess_gray(ref_gray_np) # Return this
 
-            label = self.get_image(label_file)
-            label = self.preprocess(label)
-            image = self.get_image(img_file)
-            image = self.preprocess(image)
+            gt_rgb = self.get_image(gt_file)
+            gt_gray = gt_rgb.convert('L')
+            gt_rgb_np = np.asarray(gt_rgb, np.float32)
+            gt_rgb_np = self.preprocess_rgb(gt_rgb_np) # Return this
 
-            left_gray = self.get_image(left_gray_file)
-            left_gt = self.get_image(left_rgb_file)
+            gt_gray_np = np.asarray(gt_gray, np.float32)
+            gt_gray_np = self.preprocess_gray(gt_gray_np) # Return this
+            
+            mask_np = self.get_mask(mask_file)
 
-            # if left_gray.shape != left_gt.shape:
-            #     pass
-                
-            left_gray = self.preprocess(left_gray)
-            left_gt = self.preprocess(left_gt)
+            # ===================Left Patch======================
+            # mask_left_pos = np.where(mask_np==1) 
+            # left_gt_np = self.get_gt_gray_patch(gt_file, mask_left_pos)
+            left_gray_gt_np = self.get_patch(left_rgb_gt_file)
+            left_gray_gt_np = self.preprocess_gray(left_gray_gt_np)
+            left_gray_np = self.get_patch(left_gray_file)
+            left_gray_np = self.preprocess_gray(left_gray_np)
+            # ===================Right Patch======================
+            # mask_right_pos = np.where(mask_np==2)
+            # right_gt_np = self.get_gt_gray_patch(gt_file, mask_right_pos)
+            right_gray_gt_np = self.get_patch(right_rgb_gt_file)
+            right_gray_gt_np = self.preprocess_gray(right_gray_gt_np)
+            right_gray_np = self.get_patch(right_gray_file)
+            right_gray_np = self.preprocess_gray(right_gray_np)
+            # ===================Mouth Patch======================
+            # mask_mouth_pos = np.where(mask_np==3)
+            # mouth_gt_np = self.get_gt_gray_patch(gt_file, mask_mouth_pos)
+            mouth_gray_gt_np = self.get_patch(mouth_rgb_gt_file)
+            mouth_gray_gt_np = self.preprocess_gray(mouth_gray_gt_np)
+            mouth_gray_np = self.get_patch(mouth_gray_file)
+            mouth_gray_np = self.preprocess_gray(mouth_gray_np)
 
-            right_gray = self.get_image(right_gray_file)
-            right_gray = self.preprocess(right_gray)
+            return ref_rgb_np.copy(), ref_gray_np.copy(), gt_rgb_np.copy(), gt_gray_np.copy(), left_gray_gt_np.copy(), left_gray_np.copy(), right_gray_gt_np.copy(), right_gray_np.copy(), mouth_gray_gt_np.copy(), mouth_gray_np.copy(), mask_np.copy()
 
-            mouth_gray = self.get_image(mouth_gray_file)
-            mouth_gray = self.preprocess(mouth_gray)
 
-            right_gt = self.get_image(right_rgb_file)
-            right_gt = self.preprocess(right_gt)
 
-            mouth_gt = self.get_image(mouth_rgb_file)
-            mouth_gt = self.preprocess(mouth_gt)
 
-            return image.copy(), label.copy(), left_gray.copy(), right_gray.copy(), mouth_gray.copy(), left_gt.copy(), right_gt.copy(), mouth_gt.copy(), np.array(image.shape), name

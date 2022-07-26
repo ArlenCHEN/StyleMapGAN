@@ -423,7 +423,8 @@ class Discriminator(nn.Module):
             1024: 16 * channel_multiplier,
         }
 
-        convs = [ConvLayer(3, channels[size], 1)]
+        # convs = [ConvLayer(3, channels[size], 1)]
+        convs = [ConvLayer(1, channels[size], 1)]
 
         log_size = int(math.log(size, 2))
 
@@ -1201,7 +1202,7 @@ class LocalPathway(nn.Module):
 
         # Decoder
         if is_skip:
-            self.deconv0 = deconv(2*n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.deconv0 = deconv(n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
             self.after_select0 = sequential(conv(n_fm_decoder[0] + self.conv2.out_channels, n_fm_decoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[0], activation=nn.LeakyReLU()))
 
             self.deconv1 = deconv(self.after_select0.out_channels, n_fm_decoder[1], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
@@ -1210,7 +1211,8 @@ class LocalPathway(nn.Module):
             self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
             self.after_select2 = sequential(conv(feature_layer_dim+self.conv0.out_channels, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
         else:
-            self.deconv0 = deconv(2*n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            # self.deconv0 = deconv(2*n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.deconv0 = deconv(n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
             self.after_select0 = sequential(conv(n_fm_decoder[0] + 0, n_fm_decoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[0], activation=nn.LeakyReLU()))
 
             self.deconv1 = deconv(self.after_select0.out_channels, n_fm_decoder[1], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
@@ -1224,18 +1226,20 @@ class LocalPathway(nn.Module):
         else:
             self.local_img = conv(feature_layer_dim, 1, 1, 1, 0, None, None, False)
 
-    def forward(self, x, x_1):
+    # def forward(self, x, x_1):
+    def forward(self, x):
         conv0 = self.conv0(x)
         conv1 = self.conv1(conv0)
         conv2 = self.conv2(conv1)
         conv3 = self.conv3(conv2)
     
-        conv0_1 = self.conv0_1(x_1)
-        conv1_1 = self.conv1_1(conv0_1)
-        conv2_1 = self.conv2_1(conv1_1)
-        conv3_1 = self.conv3_1(conv2_1)
+        # conv0_1 = self.conv0_1(x_1)
+        # conv1_1 = self.conv1_1(conv0_1)
+        # conv2_1 = self.conv2_1(conv1_1)
+        # conv3_1 = self.conv3_1(conv2_1)
 
-        out = torch.cat((conv3, conv3_1), dim=1)
+        # out = torch.cat((conv3, conv3_1), dim=1)
+        out = conv3
 
         if self.is_skip:
             deconv0 = self.deconv0(out)
@@ -1267,7 +1271,176 @@ class LocalPathway(nn.Module):
 
         assert local_img.shape == x.shape, '{} {}'.format(local_img.shape, x.shape)        
         return local_img, deconv2
+
+class GlobalPathway(nn.Module):
+    def __init__(self, is_gray, use_batchnorm=True, is_skip=False, feature_layer_dim=64, fm_mult=1.0):
+        super(GlobalPathway, self).__init__()
+        n_fm_encoder = [64, 128, 256, 512]
+        n_fm_decoder = [256, 128]
+        n_fm_encoder = emci(n_fm_encoder, fm_mult)
+        n_fm_decoder = emci(n_fm_decoder, fm_mult)
+        self.is_skip = is_skip
+
+        # Encoder
+        if not is_gray:
+            self.conv0 = sequential(conv(4, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        else:
+            self.conv0 = sequential(conv(2, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        self.conv1 = sequential(conv(n_fm_encoder[0], n_fm_encoder[1], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[1], activation=nn.LeakyReLU()))
+        self.conv2 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
+        self.conv3 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
+
+        self.conv0_1 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        self.conv1_1 = sequential(conv(n_fm_encoder[0], n_fm_encoder[1], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[1], activation=nn.LeakyReLU()))
+        self.conv2_1 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
+        self.conv3_1 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
+
+        # Decoder
+        if is_skip:
+            self.deconv0 = deconv(n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select0 = sequential(conv(n_fm_decoder[0] + self.conv2.out_channels, n_fm_decoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[0], activation=nn.LeakyReLU()))
+
+            self.deconv1 = deconv(self.after_select0.out_channels, n_fm_decoder[1], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select1 = sequential(conv(n_fm_decoder[1]+self.conv1.out_channels, n_fm_decoder[1], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[1], activation=nn.LeakyReLU()))
+
+            self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select2 = sequential(conv(feature_layer_dim+self.conv0.out_channels, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
+        else:
+            # self.deconv0 = deconv(2*n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.deconv0 = deconv(n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select0 = sequential(conv(n_fm_decoder[0] + 0, n_fm_decoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[0], activation=nn.LeakyReLU()))
+
+            self.deconv1 = deconv(self.after_select0.out_channels, n_fm_decoder[1], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select1 = sequential(conv(n_fm_decoder[1]+0, n_fm_decoder[1], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[1], activation=nn.LeakyReLU()))
+
+            self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select2 = sequential(conv(feature_layer_dim+0, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
         
+        if not is_gray:
+            self.local_img = conv(feature_layer_dim, 3, 1, 1, 0, None, None, False)
+        else:
+            self.local_img = conv(feature_layer_dim, 1, 1, 1, 0, None, None, False)
 
+    # def forward(self, x, x_1):
+    def forward(self, x):
+        conv0 = self.conv0(x)
+        conv1 = self.conv1(conv0)
+        conv2 = self.conv2(conv1)
+        conv3 = self.conv3(conv2)
+    
+        # conv0_1 = self.conv0_1(x_1)
+        # conv1_1 = self.conv1_1(conv0_1)
+        # conv2_1 = self.conv2_1(conv1_1)
+        # conv3_1 = self.conv3_1(conv2_1)
 
+        # out = torch.cat((conv3, conv3_1), dim=1)
+        out = conv3
 
+        if self.is_skip:
+            deconv0 = self.deconv0(out)
+            after_select0 = self.after_select0(torch.cat([deconv0, conv2], 1))
+            deconv1 = self.deconv1(after_select0)
+            after_select1 = self.after_select1(torch.cat([deconv1, conv1], 1))
+            deconv2 = self.deconv2(after_select1)
+            after_select2 = self.after_select2(torch.cat([deconv2, conv0], 1))
+        else:
+            deconv0 = self.deconv0(out)
+            after_select0 = self.after_select0(deconv0)
+            deconv1 = self.deconv1(after_select0)
+            after_select1 = self.after_select1(deconv1)
+            deconv2 = self.deconv2(after_select1)
+            after_select2 = self.after_select2(deconv2)
+
+        # print('conv0 shape: ', conv0.shape)
+        # print('conv1 shape: ', conv1.shape)
+        # print('conv2 shape: ', conv2.shape)
+        # print('conv3 shape: ', conv3.shape)
+        # print('deconv0 shape: ', deconv0.shape)
+        # print('after_select0 shape: ', after_select0.shape)
+        # print('deconv1 shape: ', deconv1.shape)
+        # print('after_select1 shape: ', after_select1.shape)
+        # print('deconv2 shape: ', deconv2.shape)
+        # print('after_select2 shape: ', after_select2.shape)
+
+        local_img = self.local_img(after_select2)
+
+        # print('local img shape: ', local_img.shape)
+        # print('x shape: ', x.shape)
+
+        # assert local_img.shape == x.shape, '{} {}'.format(local_img.shape, x.shape)        
+        return local_img, deconv2
+
+class LocalFuser(nn.Module):
+    #differs from original code here
+    #https://github.com/HRLTY/TP-GAN/blob/master/TP_GAN-Mar6FS.py
+
+    def __init__(self ):
+        super(LocalFuser,self).__init__()
+
+    def forward( self , f_left_eye , f_right_eye, f_mouth, mask_input):
+        mask = mask_input[0] # Only use the first mask to crop the size
+        
+        # Make sure all the values are not negative
+        f_left_eye = (f_left_eye+1)/2.
+        f_right_eye = (f_right_eye+1)/2.
+        f_mouth = (f_mouth+1)/2.
+
+        IMG_W = mask.shape[1]
+        IMG_H = mask.shape[0]
+
+        mask_left_pos = torch.where(mask==1) 
+        left_v_min = torch.min(mask_left_pos[0])
+        left_v_max = torch.max(mask_left_pos[0])
+        left_u_min = torch.min(mask_left_pos[1])
+        left_u_max = torch.max(mask_left_pos[1])
+
+        left_pad_left = left_u_min 
+        left_pad_right = IMG_W - left_u_max
+        left_pad_top = left_v_min 
+        left_pad_bottom = IMG_H - left_v_max
+
+        LEFT_EYE_H = left_v_max - left_v_min 
+        LEFT_EYE_W = left_u_max - left_u_min
+        new_f_left_eye = F.interpolate(f_left_eye, size=(LEFT_EYE_H, LEFT_EYE_W), mode='bilinear')
+
+        mask_right_pos = torch.where(mask==2)
+        right_v_min = torch.min(mask_right_pos[0])
+        right_v_max = torch.max(mask_right_pos[0])
+        right_u_min = torch.min(mask_right_pos[1])
+        right_u_max = torch.max(mask_right_pos[1])
+
+        right_pad_left = right_u_min
+        right_pad_right = IMG_W - right_u_max
+        right_pad_top = right_v_min
+        right_pad_bottom = IMG_H - right_v_max
+
+        RIGHT_EYE_H = right_v_max - right_v_min
+        RIGHT_EYE_W = right_u_max - right_u_min
+        new_f_right_eye = F.interpolate(f_right_eye, size=(RIGHT_EYE_H, RIGHT_EYE_W), mode='bilinear')
+
+        mask_mouth_pos = torch.where(mask==3)
+        mouth_v_min = torch.min(mask_mouth_pos[0])
+        mouth_v_max = torch.max(mask_mouth_pos[0])
+        mouth_u_min = torch.min(mask_mouth_pos[1])
+        mouth_u_max = torch.max(mask_mouth_pos[1])
+
+        mouth_pad_left = mouth_u_min
+        mouth_pad_right = IMG_W - mouth_u_max
+        mouth_pad_top = mouth_v_min
+        mouth_pad_bottom = IMG_H - mouth_v_max
+
+        MOUTH_H = mouth_v_max - mouth_v_min
+        MOUTH_W = mouth_u_max - mouth_u_min
+        new_f_mouth = F.interpolate(f_mouth, size=(MOUTH_H, MOUTH_W), mode='bilinear')
+
+        new_f_left_eye = torch.nn.functional.pad(new_f_left_eye , (left_pad_left, left_pad_right, left_pad_top, left_pad_bottom))
+        new_f_right_eye = torch.nn.functional.pad(new_f_right_eye,(right_pad_left, right_pad_right, right_pad_top, right_pad_bottom))
+        new_f_mouth = torch.nn.functional.pad(new_f_mouth,        (mouth_pad_left, mouth_pad_right, mouth_pad_top, mouth_pad_bottom))
+
+        temp_out = torch.cat(( new_f_left_eye , new_f_right_eye, new_f_mouth), 1)
+        final_out = torch.max(temp_out, dim=1)[0]
+        final_out = final_out.unsqueeze(1)
+        final_out = final_out*2 - 1 # Normalize the data to [-1, 1]. Make sure the fused data has the same data type with the ref image
+
+        return final_out
+        
