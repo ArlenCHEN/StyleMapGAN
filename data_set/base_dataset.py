@@ -132,7 +132,7 @@ class BaseDataset(data.Dataset):
 
     def get_mask(self, file):
         raw_mask_np = np.load(file)
-        raw_mask_im = Image.fromarray(np.uint8(raw_mask_np))
+        raw_mask_im = Image.fromarray(np.uint8(raw_mask_np)) # Convert the value of -1 to 255
         resized_mask_im = raw_mask_im.resize((self.image_size, self.image_size), Image.NEAREST) # Do not change the mask values
         
         return np.asarray(resized_mask_im)

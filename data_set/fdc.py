@@ -98,6 +98,7 @@ class FDCDataset(BaseDataset):
             return ref_rgb_np.copy(), overlaid_rgb_np.copy(), gt_rgb_np.copy(), mask_np.copy()
         else: # Local based method
             ref_file, gt_file, left_gray_file, left_rgb_gt_file, right_gray_file, right_rgb_gt_file, mouth_gray_file, mouth_rgb_gt_file, mask_file, name = self.files[index]
+            mask_np = self.get_mask(mask_file)
 
             ref_rgb = self.get_image(ref_file)
             ref_gray = ref_rgb.convert('L')
@@ -106,6 +107,9 @@ class FDCDataset(BaseDataset):
             
             ref_gray_np = np.asarray(ref_gray, np.float32)
             ref_gray_np = self.preprocess_gray(ref_gray_np) # Return this
+            ref_mask = np.ones(mask_np.shape)
+            ref_mask[mask_np!=255] = 0
+            new_ref_gray_np = np.multiply(ref_mask, ref_gray_np).astype(np.float32)
 
             gt_rgb = self.get_image(gt_file)
             gt_gray = gt_rgb.convert('L')
@@ -114,8 +118,6 @@ class FDCDataset(BaseDataset):
 
             gt_gray_np = np.asarray(gt_gray, np.float32)
             gt_gray_np = self.preprocess_gray(gt_gray_np) # Return this
-            
-            mask_np = self.get_mask(mask_file)
 
             # ===================Left Patch======================
             # mask_left_pos = np.where(mask_np==1) 
@@ -139,8 +141,4 @@ class FDCDataset(BaseDataset):
             mouth_gray_np = self.get_patch(mouth_gray_file)
             mouth_gray_np = self.preprocess_gray(mouth_gray_np)
 
-            return ref_rgb_np.copy(), ref_gray_np.copy(), gt_rgb_np.copy(), gt_gray_np.copy(), left_gray_gt_np.copy(), left_gray_np.copy(), right_gray_gt_np.copy(), right_gray_np.copy(), mouth_gray_gt_np.copy(), mouth_gray_np.copy(), mask_np.copy()
-
-
-
-
+            return ref_rgb_np.copy(), new_ref_gray_np.copy(), gt_rgb_np.copy(), gt_gray_np.copy(), left_gray_gt_np.copy(), left_gray_np.copy(), right_gray_gt_np.copy(), right_gray_np.copy(), mouth_gray_gt_np.copy(), mouth_gray_np.copy(), mask_np.copy()

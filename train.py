@@ -933,7 +933,7 @@ def ddp_main(rank, world_size, args):
                         f"{save_dir}/checkpoints/{args.suffix}/{str(i).zfill(6)}.pt",
                     )
             else: # Local based method                
-                global_switch = 2000
+                global_switch = 3
                 if i>global_switch:
                     left_model_input = [left_raw, left_gt]
                     left_fake, left_feature, left_rec_loss, left_perceptual_loss = model(left_model_input, 'left')
@@ -946,7 +946,7 @@ def ddp_main(rank, world_size, args):
 
                     local_fuser_input = [left_fake, right_fake, mouth_fake, mask]
                     local_fused = model(local_fuser_input, 'local_fusion')
-
+                    
                     # Global prediction
                     global_ae_input = [local_fused, ref_gray, ref_rgb, gt_gray, gt_rgb]
                     global_fake, global_feature, global_rec_loss, global_perceptual_loss, global_adv_loss = model(global_ae_input, 'global_ae_ad')

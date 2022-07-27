@@ -1380,7 +1380,7 @@ class LocalFuser(nn.Module):
     def forward( self , f_left_eye , f_right_eye, f_mouth, mask_input):
         mask = mask_input[0] # Only use the first mask to crop the size
         
-        # Make sure all the values are not negative
+        # Make sure all the values are not negative when torch.max is used
         f_left_eye = (f_left_eye+1)/2.
         f_right_eye = (f_right_eye+1)/2.
         f_mouth = (f_mouth+1)/2.
