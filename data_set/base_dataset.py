@@ -39,9 +39,7 @@ class BaseDataset(data.Dataset):
             mask_file = os.path.join(name, 'mask.npy')
 
             if self.is_global:
-                self.files.append((reference_file, overlaid_file, gt_file, 
-                                left_gray_patch_file, left_rgb_gt_file, right_gray_patch_file, 
-                                right_rgb_gt_file, mouth_gray_patch_file, mouth_rgb_gt_file,
+                self.files.append((reference_file, overlaid_file, gt_file,
                                 mask_file, name))
             else:
                 # self.files.append((reference_file, overlaid_file, label_file, 
@@ -72,10 +70,12 @@ class BaseDataset(data.Dataset):
         return len(self.files)
 
     def preprocess_gray(self, image):
-        image -= self.mean_gray
+        image = image.astype(np.float32)
+        image = image - self.mean_gray
         image = image/128.
         image = image[..., np.newaxis] # Expand the dim of the gray image
         final_image = image.transpose((2, 0, 1)) # to [c h w]
+
         return final_image
 
     def preprocess_rgb(self, image):
@@ -83,9 +83,10 @@ class BaseDataset(data.Dataset):
         Standardazation: (x-mean)/128.
         '''
         # image = image[:, :, ::-1] # change to BGR???
-
+        
+        image = image.astype(np.float32)
         # Standardazation
-        image -= self.mean_rgb
+        image = image - self.mean_rgb
 
         # # Normalization: [0, 1]
         # image_max = np.max(image)
@@ -96,6 +97,7 @@ class BaseDataset(data.Dataset):
         # Normalization: [-1, 1]
         image = image/128.
         final_image = image.transpose((2, 0, 1)) # to [c h w]
+        final_image = final_image.astype(np.float32)
         return final_image
 
     def get_image(self, file):
@@ -109,7 +111,7 @@ class BaseDataset(data.Dataset):
         img = img.convert('L') # Convert the channel number to 1
         # img = img.resize(new_size) # Resize the patch according to the mask size
         img = img.resize((self.image_size, self.image_size)) # Resize the patch to the square size
-        img_np = np.asarray(img).astype(np.float32)
+        img_np = np.asarray(img)
         return img_np
 
     # def get_gt_gray_patch(self, file, mask_pos_np):

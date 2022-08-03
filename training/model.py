@@ -17,6 +17,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.autograd import Function
+# from train import requires_grad
 
 from training.op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d
 
@@ -408,7 +409,7 @@ class ResBlock(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1]):
+    def __init__(self, is_gray, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1]):
         super().__init__()
 
         channels = {
@@ -423,8 +424,10 @@ class Discriminator(nn.Module):
             1024: 16 * channel_multiplier,
         }
 
-        # convs = [ConvLayer(3, channels[size], 1)]
-        convs = [ConvLayer(1, channels[size], 1)]
+        if not is_gray:
+            convs = [ConvLayer(3, channels[size], 1)]
+        else:
+            convs = [ConvLayer(1, channels[size], 1)]
 
         log_size = int(math.log(size, 2))
 
@@ -1272,6 +1275,206 @@ class LocalPathway(nn.Module):
         assert local_img.shape == x.shape, '{} {}'.format(local_img.shape, x.shape)        
         return local_img, deconv2
 
+# Gloabl fusion for local method
+class GlobalPathway_1(nn.Module):
+    def __init__(self, is_gray, use_batchnorm=True, is_skip=False, feature_layer_dim=64, fm_mult=1.0):
+        super(GlobalPathway_1, self).__init__()
+        n_fm_encoder = [64, 128, 256, 512]
+        n_fm_decoder = [256, 128]
+        n_fm_encoder = emci(n_fm_encoder, fm_mult)
+        n_fm_decoder = emci(n_fm_decoder, fm_mult)
+        self.is_skip = is_skip
+
+        # Encoder for reference image
+        if not is_gray:
+            self.conv0 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        else:
+            self.conv0 = sequential(conv(1, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        self.conv1 = sequential(conv(n_fm_encoder[0], n_fm_encoder[1], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[1], activation=nn.LeakyReLU()))
+        self.conv2 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
+        self.conv3 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
+
+        # Encoder for grayscale prediction image
+        self.conv0_1 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        self.conv1_1 = sequential(conv(n_fm_encoder[0], n_fm_encoder[1], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[1], activation=nn.LeakyReLU()))
+        self.conv2_1 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
+        self.conv3_1 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
+
+        # Decoder
+        if is_skip:
+            self.deconv0 = deconv(2*n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select0 = sequential(conv(n_fm_decoder[0] + self.conv2_1.out_channels, n_fm_decoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[0], activation=nn.LeakyReLU()))
+
+            self.deconv1 = deconv(self.after_select0.out_channels, n_fm_decoder[1], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select1 = sequential(conv(n_fm_decoder[1]+self.conv1_1.out_channels, n_fm_decoder[1], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[1], activation=nn.LeakyReLU()))
+
+            self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select2 = sequential(conv(feature_layer_dim+self.conv0_1.out_channels, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
+        else:
+            self.deconv0 = deconv(2*n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            # self.deconv0 = deconv(n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select0 = sequential(conv(n_fm_decoder[0] + 0, n_fm_decoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[0], activation=nn.LeakyReLU()))
+
+            self.deconv1 = deconv(self.after_select0.out_channels, n_fm_decoder[1], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select1 = sequential(conv(n_fm_decoder[1]+0, n_fm_decoder[1], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[1], activation=nn.LeakyReLU()))
+
+            self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select2 = sequential(conv(feature_layer_dim+0, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
+        
+        if not is_gray:
+            self.local_img = conv(feature_layer_dim, 3, 1, 1, 0, None, None, False)
+        else:
+            self.local_img = conv(feature_layer_dim, 1, 1, 1, 0, None, None, False)
+
+    def forward(self, x, x_1): # x: ref image x_1: overlaid
+        # Encoding of the ref image
+        conv0 = self.conv0(x)
+        conv1 = self.conv1(conv0)
+        conv2 = self.conv2(conv1)
+        conv3 = self.conv3(conv2)
+        
+        # Encoding of the prediction
+        conv0_1 = self.conv0_1(x_1)
+        conv1_1 = self.conv1_1(conv0_1)
+        conv2_1 = self.conv2_1(conv1_1)
+        conv3_1 = self.conv3_1(conv2_1)
+
+        out = torch.cat((conv3, conv3_1), dim=1)
+        # out = conv3
+
+        if self.is_skip:
+            deconv0 = self.deconv0(out)
+            after_select0 = self.after_select0(torch.cat([deconv0, conv2_1], 1))
+            deconv1 = self.deconv1(after_select0)
+            after_select1 = self.after_select1(torch.cat([deconv1, conv1_1], 1))
+            deconv2 = self.deconv2(after_select1)
+            after_select2 = self.after_select2(torch.cat([deconv2, conv0_1], 1))
+        else:
+            deconv0 = self.deconv0(out)
+            after_select0 = self.after_select0(deconv0)
+            deconv1 = self.deconv1(after_select0)
+            after_select1 = self.after_select1(deconv1)
+            deconv2 = self.deconv2(after_select1)
+            after_select2 = self.after_select2(deconv2)
+
+        # print('conv0 shape: ', conv0.shape)
+        # print('conv1 shape: ', conv1.shape)
+        # print('conv2 shape: ', conv2.shape)
+        # print('conv3 shape: ', conv3.shape)
+        # print('deconv0 shape: ', deconv0.shape)
+        # print('after_select0 shape: ', after_select0.shape)
+        # print('deconv1 shape: ', deconv1.shape)
+        # print('after_select1 shape: ', after_select1.shape)
+        # print('deconv2 shape: ', deconv2.shape)
+        # print('after_select2 shape: ', after_select2.shape)
+
+        local_img = self.local_img(after_select2)
+
+        # print('local img shape: ', local_img.shape)
+        # print('x shape: ', x.shape)
+
+        # assert local_img.shape == x.shape, '{} {}'.format(local_img.shape, x.shape)        
+        return local_img, deconv2
+
+# Global fusion for global method
+class GlobalPathway_2(nn.Module):
+    def __init__(self, is_gray, use_batchnorm=True, is_skip=False, feature_layer_dim=64, fm_mult=1.0):
+        super(GlobalPathway_2, self).__init__()
+        n_fm_encoder = [64, 128, 256, 512]
+        n_fm_decoder = [256, 128]
+        n_fm_encoder = emci(n_fm_encoder, fm_mult)
+        n_fm_decoder = emci(n_fm_decoder, fm_mult)
+        self.is_skip = is_skip
+
+        # Encoder
+        if not is_gray:
+            self.conv0 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        else:
+            self.conv0 = sequential(conv(1, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        self.conv1 = sequential(conv(n_fm_encoder[0], n_fm_encoder[1], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[1], activation=nn.LeakyReLU()))
+        self.conv2 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
+        self.conv3 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
+
+        self.conv0_1 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        self.conv1_1 = sequential(conv(n_fm_encoder[0], n_fm_encoder[1], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[1], activation=nn.LeakyReLU()))
+        self.conv2_1 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
+        self.conv3_1 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
+
+        # Decoder
+        if is_skip:
+            self.deconv0 = deconv(n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select0 = sequential(conv(n_fm_decoder[0] + self.conv2.out_channels, n_fm_decoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[0], activation=nn.LeakyReLU()))
+
+            self.deconv1 = deconv(self.after_select0.out_channels, n_fm_decoder[1], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select1 = sequential(conv(n_fm_decoder[1]+self.conv1.out_channels, n_fm_decoder[1], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[1], activation=nn.LeakyReLU()))
+
+            self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select2 = sequential(conv(feature_layer_dim+self.conv0.out_channels, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
+        else:
+            self.deconv0 = deconv(2*n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            # self.deconv0 = deconv(n_fm_encoder[3], n_fm_decoder[0], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select0 = sequential(conv(n_fm_decoder[0] + 0, n_fm_decoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[0], activation=nn.LeakyReLU()))
+
+            self.deconv1 = deconv(self.after_select0.out_channels, n_fm_decoder[1], 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select1 = sequential(conv(n_fm_decoder[1]+0, n_fm_decoder[1], 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(n_fm_decoder[1], activation=nn.LeakyReLU()))
+
+            self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
+            self.after_select2 = sequential(conv(feature_layer_dim+0, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
+        
+        if not is_gray:
+            self.local_img = conv(feature_layer_dim, 3, 1, 1, 0, None, None, False)
+        else:
+            self.local_img = conv(feature_layer_dim, 1, 1, 1, 0, None, None, False)
+
+    def forward(self, x, x_1): # x: overlaid; x_1: ref_img
+    # def forward(self, x):
+        conv0 = self.conv0(x)
+        conv1 = self.conv1(conv0)
+        conv2 = self.conv2(conv1)
+        conv3 = self.conv3(conv2)
+    
+        conv0_1 = self.conv0_1(x_1)
+        conv1_1 = self.conv1_1(conv0_1)
+        conv2_1 = self.conv2_1(conv1_1)
+        conv3_1 = self.conv3_1(conv2_1)
+
+        out = torch.cat((conv3, conv3_1), dim=1)
+        # out = conv3
+
+        if self.is_skip:
+            deconv0 = self.deconv0(out)
+            after_select0 = self.after_select0(torch.cat([deconv0, conv2], 1))
+            deconv1 = self.deconv1(after_select0)
+            after_select1 = self.after_select1(torch.cat([deconv1, conv1], 1))
+            deconv2 = self.deconv2(after_select1)
+            after_select2 = self.after_select2(torch.cat([deconv2, conv0], 1))
+        else:
+            deconv0 = self.deconv0(out)
+            after_select0 = self.after_select0(deconv0)
+            deconv1 = self.deconv1(after_select0)
+            after_select1 = self.after_select1(deconv1)
+            deconv2 = self.deconv2(after_select1)
+            after_select2 = self.after_select2(deconv2)
+
+        # print('conv0 shape: ', conv0.shape)
+        # print('conv1 shape: ', conv1.shape)
+        # print('conv2 shape: ', conv2.shape)
+        # print('conv3 shape: ', conv3.shape)
+        # print('deconv0 shape: ', deconv0.shape)
+        # print('after_select0 shape: ', after_select0.shape)
+        # print('deconv1 shape: ', deconv1.shape)
+        # print('after_select1 shape: ', after_select1.shape)
+        # print('deconv2 shape: ', deconv2.shape)
+        # print('after_select2 shape: ', after_select2.shape)
+
+        local_img = self.local_img(after_select2)
+
+        # print('local img shape: ', local_img.shape)
+        # print('x shape: ', x.shape)
+
+        # assert local_img.shape == x.shape, '{} {}'.format(local_img.shape, x.shape)        
+        return local_img, deconv2
+
 class GlobalPathway(nn.Module):
     def __init__(self, is_gray, use_batchnorm=True, is_skip=False, feature_layer_dim=64, fm_mult=1.0):
         super(GlobalPathway, self).__init__()
@@ -1380,11 +1583,6 @@ class LocalFuser(nn.Module):
     def forward( self , f_left_eye , f_right_eye, f_mouth, mask_input):
         mask = mask_input[0] # Only use the first mask to crop the size
         
-        # Make sure all the values are not negative when torch.max is used
-        f_left_eye = (f_left_eye+1)/2.
-        f_right_eye = (f_right_eye+1)/2.
-        f_mouth = (f_mouth+1)/2.
-
         IMG_W = mask.shape[1]
         IMG_H = mask.shape[0]
 
@@ -1437,10 +1635,169 @@ class LocalFuser(nn.Module):
         new_f_right_eye = torch.nn.functional.pad(new_f_right_eye,(right_pad_left, right_pad_right, right_pad_top, right_pad_bottom))
         new_f_mouth = torch.nn.functional.pad(new_f_mouth,        (mouth_pad_left, mouth_pad_right, mouth_pad_top, mouth_pad_bottom))
 
-        temp_out = torch.cat(( new_f_left_eye , new_f_right_eye, new_f_mouth), 1)
-        final_out = torch.max(temp_out, dim=1)[0]
-        final_out = final_out.unsqueeze(1)
-        final_out = final_out*2 - 1 # Normalize the data to [-1, 1]. Make sure the fused data has the same data type with the ref image
-
-        return final_out
+        # final_out = torch.cat(( ref_gray, new_f_left_eye , new_f_right_eye, new_f_mouth), 1)
+        final_out = torch.cat((new_f_left_eye , new_f_right_eye, new_f_mouth), 1)
         
+        return final_out
+
+import torch
+import torch.nn as nn
+import numpy as np
+from scipy.signal import gaussian
+
+class CannyFilter(nn.Module):
+    def __init__(self, threshold=10.0, use_cuda=True):
+        super(CannyFilter, self).__init__()
+
+        self.threshold = threshold
+        self.use_cuda = use_cuda
+
+        filter_size = 5
+        generated_filters = gaussian(filter_size,std=1.0).reshape([1,filter_size])
+
+        self.gaussian_filter_horizontal = nn.Conv2d(in_channels=1, out_channels=1, kernel_size=(1,filter_size), padding=(0,filter_size//2))
+        self.gaussian_filter_horizontal.weight.data.copy_(torch.from_numpy(generated_filters))
+        self.gaussian_filter_horizontal.bias.data.copy_(torch.from_numpy(np.array([0.0])))
+        self.gaussian_filter_vertical = nn.Conv2d(in_channels=1, out_channels=1, kernel_size=(filter_size,1), padding=(filter_size//2,0))
+        self.gaussian_filter_vertical.weight.data.copy_(torch.from_numpy(generated_filters.T))
+        self.gaussian_filter_vertical.bias.data.copy_(torch.from_numpy(np.array([0.0])))
+
+        sobel_filter = np.array([[1, 0, -1],
+                                 [2, 0, -2],
+                                 [1, 0, -1]])
+
+        self.sobel_filter_horizontal = nn.Conv2d(in_channels=1, out_channels=1, kernel_size=sobel_filter.shape, padding=sobel_filter.shape[0]//2)
+        self.sobel_filter_horizontal.weight.data.copy_(torch.from_numpy(sobel_filter))
+        self.sobel_filter_horizontal.bias.data.copy_(torch.from_numpy(np.array([0.0])))
+        self.sobel_filter_vertical = nn.Conv2d(in_channels=1, out_channels=1, kernel_size=sobel_filter.shape, padding=sobel_filter.shape[0]//2)
+        self.sobel_filter_vertical.weight.data.copy_(torch.from_numpy(sobel_filter.T))
+        self.sobel_filter_vertical.bias.data.copy_(torch.from_numpy(np.array([0.0])))
+
+        # filters were flipped manually
+        filter_0 = np.array([   [ 0, 0, 0],
+                                [ 0, 1, -1],
+                                [ 0, 0, 0]])
+
+        filter_45 = np.array([  [0, 0, 0],
+                                [ 0, 1, 0],
+                                [ 0, 0, -1]])
+
+        filter_90 = np.array([  [ 0, 0, 0],
+                                [ 0, 1, 0],
+                                [ 0,-1, 0]])
+
+        filter_135 = np.array([ [ 0, 0, 0],
+                                [ 0, 1, 0],
+                                [-1, 0, 0]])
+
+        filter_180 = np.array([ [ 0, 0, 0],
+                                [-1, 1, 0],
+                                [ 0, 0, 0]])
+
+        filter_225 = np.array([ [-1, 0, 0],
+                                [ 0, 1, 0],
+                                [ 0, 0, 0]])
+
+        filter_270 = np.array([ [ 0,-1, 0],
+                                [ 0, 1, 0],
+                                [ 0, 0, 0]])
+
+        filter_315 = np.array([ [ 0, 0, -1],
+                                [ 0, 1, 0],
+                                [ 0, 0, 0]])
+
+        all_filters = np.stack([filter_0, filter_45, filter_90, filter_135, filter_180, filter_225, filter_270, filter_315])
+
+        self.directional_filter = nn.Conv2d(in_channels=1, out_channels=8, kernel_size=filter_0.shape, padding=filter_0.shape[-1] // 2)
+        self.directional_filter.weight.data.copy_(torch.from_numpy(all_filters[:, None, ...]))
+        self.directional_filter.bias.data.copy_(torch.from_numpy(np.zeros(shape=(all_filters.shape[0],))))
+        self.is_gray = True
+
+    def forward(self, img):
+        img_r = img[:,0:1]
+        if not self.is_gray:
+            img_g = img[:,1:2]
+            img_b = img[:,2:3]
+
+        blur_horizontal = self.gaussian_filter_horizontal(img_r)
+        blurred_img_r = self.gaussian_filter_vertical(blur_horizontal)
+        if not self.is_gray:
+            blur_horizontal = self.gaussian_filter_horizontal(img_g)
+            blurred_img_g = self.gaussian_filter_vertical(blur_horizontal)
+            blur_horizontal = self.gaussian_filter_horizontal(img_b)
+            blurred_img_b = self.gaussian_filter_vertical(blur_horizontal)
+
+        if self.is_gray:
+            blurred_img = blurred_img_r
+
+        else:
+            blurred_img = torch.stack([blurred_img_r,blurred_img_g,blurred_img_b],dim=1)
+        blurred_img = torch.stack([torch.squeeze(blurred_img)])
+
+        grad_x_r = self.sobel_filter_horizontal(blurred_img_r)
+        grad_y_r = self.sobel_filter_vertical(blurred_img_r)
+        if not self.is_gray:
+            grad_x_g = self.sobel_filter_horizontal(blurred_img_g)
+            grad_y_g = self.sobel_filter_vertical(blurred_img_g)
+            grad_x_b = self.sobel_filter_horizontal(blurred_img_b)
+            grad_y_b = self.sobel_filter_vertical(blurred_img_b)
+
+
+        # COMPUTE THICK EDGES
+        grad_mag = torch.sqrt(grad_x_r**2 + grad_y_r**2)
+        if not self.is_gray:
+            grad_mag += torch.sqrt(grad_x_g**2 + grad_y_g**2)
+            grad_mag += torch.sqrt(grad_x_b**2 + grad_y_b**2)
+        # grad_orientation = (torch.atan2(grad_y_r+grad_y_g+grad_y_b, grad_x_r+grad_x_g+grad_x_b) * (180.0/3.14159))
+        # grad_orientation += 180.0
+        # grad_orientation =  torch.round( grad_orientation / 45.0 ) * 45.0
+
+        # # THIN EDGES (NON-MAX SUPPRESSION)
+
+        # all_filtered = self.directional_filter(grad_mag)
+
+        # inidices_positive = (grad_orientation / 45) % 8
+        # inidices_negative = ((grad_orientation / 45) + 4) % 8
+
+        # height = inidices_positive.size()[2]
+        # width = inidices_positive.size()[3]
+        # pixel_count = height * width
+        # pixel_range = torch.FloatTensor([range(pixel_count)])
+        # if self.use_cuda:
+        #     pixel_range = torch.cuda.FloatTensor([range(pixel_count)])
+
+        # indices = (inidices_positive.view(-1).data * pixel_count + pixel_range).squeeze()
+        # channel_select_filtered_positive = all_filtered.view(-1)[indices.long()].view(1,height,width)
+
+        # indices = (inidices_negative.view(-1).data * pixel_count + pixel_range).squeeze()
+        # channel_select_filtered_negative = all_filtered.view(-1)[indices.long()].view(1,height,width)
+
+        # channel_select_filtered = torch.stack([channel_select_filtered_positive,channel_select_filtered_negative])
+
+        # is_max = channel_select_filtered.min(dim=0)[0] > 0.0
+        # is_max = torch.unsqueeze(is_max, dim=0)
+
+        # thin_edges = grad_mag.clone()
+        # thin_edges[is_max==0] = 0.0
+
+        # # THRESHOLD
+
+        # thresholded = thin_edges.clone()
+        # thresholded[thin_edges<self.threshold] = 0.0
+
+        # early_threshold = grad_mag.clone()
+        # early_threshold[grad_mag<self.threshold] = 0.0
+
+        # assert grad_mag.size() == grad_orientation.size() == thin_edges.size() == thresholded.size() == early_threshold.size()
+
+        # return blurred_img, grad_mag, grad_orientation, thin_edges, thresholded, early_threshold
+
+        max_grad = torch.max(grad_mag)
+        min_grad = torch.min(grad_mag)
+        grad_range = max_grad - min_grad
+
+        grad_mag -= min_grad
+        grad_mag /= grad_range
+
+        print('grad mag shape: ', grad_mag.shape)
+        return grad_mag

@@ -1,5 +1,6 @@
 import torch.nn as nn
 from torch.nn.init import xavier_normal, kaiming_normal
+from torch.nn import BatchNorm2d
 
 def sequential(*kargs):
     seq = nn.Sequential(*kargs)
