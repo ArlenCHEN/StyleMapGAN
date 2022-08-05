@@ -1,3 +1,4 @@
+from urllib.parse import ParseResultBytes
 import numpy as np
 from torch.utils import data
 from pathlib import Path
@@ -24,6 +25,14 @@ class BaseDataset(data.Dataset):
             self.img_ids = [i_id.strip() for i_id in f]
         self.files = []
         for name in self.img_ids:
+            # Rename the path in xxx.txt
+            if name[:5] == '/home':
+                temp_name = name[30:]
+                name = os.path.join(self.list_path, temp_name)
+            elif name[:4] == '/nfs':
+                temp_name = name[35:]
+                name = os.path.join(self.list_path, temp_name)
+
             reference_file = os.path.join(name, 'reference.png')
             overlaid_file = os.path.join(name, 'overlaid.png')
             gt_file = os.path.join(name, 'gt.png')

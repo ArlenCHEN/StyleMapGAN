@@ -1277,13 +1277,14 @@ class LocalPathway(nn.Module):
 
 # Gloabl fusion for local method
 class GlobalPathway_1(nn.Module):
-    def __init__(self, is_gray, use_batchnorm=True, is_skip=False, feature_layer_dim=64, fm_mult=1.0):
+    def __init__(self, is_gray, is_single_channel, use_batchnorm=True, is_skip=False, feature_layer_dim=64, fm_mult=1.0):
         super(GlobalPathway_1, self).__init__()
         n_fm_encoder = [64, 128, 256, 512]
         n_fm_decoder = [256, 128]
         n_fm_encoder = emci(n_fm_encoder, fm_mult)
         n_fm_decoder = emci(n_fm_decoder, fm_mult)
         self.is_skip = is_skip
+        self.is_single_channel = is_single_channel
 
         # Encoder for reference image
         if not is_gray:
@@ -1294,8 +1295,11 @@ class GlobalPathway_1(nn.Module):
         self.conv2 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
         self.conv3 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
 
-        # Encoder for grayscale prediction image
-        self.conv0_1 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        if self.is_single_channel:
+            self.conv0_1 = sequential(conv(1, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        else:
+            # Encoder for grayscale prediction image
+            self.conv0_1 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
         self.conv1_1 = sequential(conv(n_fm_encoder[0], n_fm_encoder[1], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[1], activation=nn.LeakyReLU()))
         self.conv2_1 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
         self.conv3_1 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
@@ -1577,14 +1581,21 @@ class LocalFuser(nn.Module):
     #differs from original code here
     #https://github.com/HRLTY/TP-GAN/blob/master/TP_GAN-Mar6FS.py
 
-    def __init__(self ):
+    def __init__(self, is_single_channel):
         super(LocalFuser,self).__init__()
+        self.is_single_channel = is_single_channel
 
     def forward( self , f_left_eye , f_right_eye, f_mouth, mask_input):
         mask = mask_input[0] # Only use the first mask to crop the size
         
         IMG_W = mask.shape[1]
         IMG_H = mask.shape[0]
+        
+        if self.is_single_channel:
+            # Make sure all values are positive
+            f_left_eye = (f_left_eye+1)/2.
+            f_right_eye = (f_right_eye+1)/2.
+            f_mouth = (f_mouth+1)/2.
 
         mask_left_pos = torch.where(mask==1) 
         left_v_min = torch.min(mask_left_pos[0])
@@ -1638,6 +1649,14 @@ class LocalFuser(nn.Module):
         # final_out = torch.cat(( ref_gray, new_f_left_eye , new_f_right_eye, new_f_mouth), 1)
         final_out = torch.cat((new_f_left_eye , new_f_right_eye, new_f_mouth), 1)
         
+        val_margin = 50.
+
+        if self.is_single_channel:
+            final_out = torch.max(final_out, dim=1)[0]
+            final_out = final_out.unsqueeze(1)
+            # final_out = final_out-val_margin
+            final_out = final_out*2 - 1
+
         return final_out
 
 import torch

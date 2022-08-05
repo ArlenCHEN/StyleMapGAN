@@ -69,8 +69,9 @@ def tensor2image(im_tensor):
 
 def setup(rank, world_size):
     os.environ["MASTER_ADDR"] = "localhost"
-    # os.environ["MASTER_PORT"] = "12355"
-    os.environ["MASTER_PORT"] = "12356"
+    # os.environ["MASTER_PORT"] = "12355" # CUDA=7
+    # os.environ["MASTER_PORT"] = "12356" #CUDA=6
+    os.environ["MASTER_PORT"] = "12357" # CUDA=4
 
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
@@ -221,9 +222,9 @@ class DDPModel(nn.Module):
             self.local_pathway_left_eye = LocalPathway(is_gray=True, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
             self.local_pathway_right_eye = LocalPathway(is_gray=True, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
             self.local_pathway_mouth = LocalPathway(is_gray=True, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
-            self.local_fuser = LocalFuser()
-            self.global_ae = GlobalPathway_1(is_gray=args.is_gray, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
-            self.global_ema = GlobalPathway_1(is_gray=args.is_gray, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+            self.local_fuser = LocalFuser(is_single_channel=args.is_single_channel)
+            self.global_ae = GlobalPathway_1(is_gray=args.is_gray, is_single_channel=args.is_single_channel, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+            self.global_ema = GlobalPathway_1(is_gray=args.is_gray, is_single_channel=args.is_single_channel, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
             # self.edge_detector = CannyFilter()
             # self.edge_detector.eval()
             self.ae_discriminator = Discriminator(
@@ -537,6 +538,7 @@ def ddp_main(rank, world_size, args):
             cfg = ckpt["cfg"] # Note: Only read this when pathway net is used
             print("load model:", args.ckpt)
             train_args.start_iter = int(args.ckpt.split("/")[-1].replace(".pt", ""))
+            train_args.iter = args.iter # Use the max iter in arguments as the used one
             print(f"continue training from {train_args.start_iter} iter")
             args = train_args
             args.ckpt = True
@@ -649,17 +651,30 @@ def ddp_main(rank, world_size, args):
 
     if args.ckpt:
         if is_ae:
-            # model.module.local_pathway_left_eye.load_state_dict(ckpt["local_pathway_left_eye"])
-            # model.module.local_pathway_right_eye.load_state_dict(ckpt["local_pathway_right_eye"])
-            # model.module.local_pathway_mouth.load_state_dict(ckpt["local_pathway_mouth"])
-            if is_gray:
-                model.module.global_gray_ae.load_state_dict(ckpt["global_gray_ae"])
+            if is_global:
+                # model.module.local_pathway_left_eye.load_state_dict(ckpt["local_pathway_left_eye"])
+                # model.module.local_pathway_right_eye.load_state_dict(ckpt["local_pathway_right_eye"])
+                # model.module.local_pathway_mouth.load_state_dict(ckpt["local_pathway_mouth"])
+                if is_gray:
+                    model.module.global_gray_ae.load_state_dict(ckpt["global_gray_ae"])
+                else:
+                    model.module.global_rgb_ae.load_state_dict(ckpt["global_rgb_ae"])
+                    model.module.ae_discriminator.load_state_dict(ckpt["ae_discriminator"])
+                    model.module.global_ema.load_state_dict(ckpt['global_ema'])
+                    global_rgb_ae_optim.load_state_dict(ckpt['global_rgb_ae_optim'])
+                    ae_d_optim.load_state_dict(ckpt['ae_d_optim'])
             else:
-                model.module.global_rgb_ae.load_state_dict(ckpt["global_rgb_ae"])
-                model.module.ae_discriminator.load_state_dict(ckpt["ae_discriminator"])
+                model.module.local_pathway_left_eye.load_state_dict(ckpt['local_pathway_left_eye'])
+                model.module.local_pathway_right_eye.load_state_dict(ckpt['local_pathway_right_eye'])
+                model.module.local_pathway_mouth.load_state_dict(ckpt['local_pathway_mouth'])
+                model.module.global_ae.load_state_dict(ckpt['global_ae'])
+                model.module.ae_discriminator.load_state_dict(ckpt['ae_discriminator'])
                 model.module.global_ema.load_state_dict(ckpt['global_ema'])
-                global_rgb_ae_optim.load_state_dict(ckpt['global_rgb_ae_optim'])
+                global_ae_optim.load_state_dict(ckpt['global_ae_optim'])
                 ae_d_optim.load_state_dict(ckpt['ae_d_optim'])
+                local_left_optim.load_state_dict(ckpt['local_left_optim'])
+                local_right_optim.load_state_dict(ckpt['local_right_optim'])
+                local_mouth_optim.load_state_dict(ckpt['local_mouth_optim'])
         else:
             model.module.generator.load_state_dict(ckpt["generator"])
             model.module.discriminator.load_state_dict(ckpt["discriminator"])
@@ -693,10 +708,10 @@ def ddp_main(rank, world_size, args):
             [
                 transforms.Resize((args.size, args.size)),
                 transforms.Grayscale(num_output_channels=1), # channel is 1, cannot use Normalize
-                transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5),
-                transforms.RandomAffine(degrees=0, shear=(0,0,0,20)),
+                transforms.ColorJitter(brightness=0.9, contrast=0.9, saturation=0.9),
+                transforms.RandomAffine(degrees=0, shear=(0,0,-20,20)),
                 # transforms.GaussianBlur(kernel_size=151),
-                transforms.RandomResizedCrop(size=args.size, scale=(0.8, 1.0))
+                transforms.RandomResizedCrop(size=args.size, scale=(0.75, 1.0))
             ]
         )
 
@@ -704,9 +719,9 @@ def ddp_main(rank, world_size, args):
             [
                 transforms.Resize((args.size, args.size)),
                 transforms.Grayscale(num_output_channels=1), # channel is 1, cannot use Normalize
-                transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5),
+                transforms.ColorJitter(brightness=0.9, contrast=0.9, saturation=0.9),
                 # transforms.GaussianBlur(kernel_size=151),
-                transforms.RandomResizedCrop(size=args.size, scale=(0.8, 1.0))
+                # transforms.RandomResizedCrop(size=args.size, scale=(0.75, 1.0))
             ]
         )
 
@@ -1195,13 +1210,14 @@ def ddp_main(rank, world_size, args):
                     vis_mouth_fake = tensor2image(temp_mouth_fake)
                     vis_mouth_fake = (vis_mouth_fake+1)/2.
 
-                    # temp_global_input = global_input.detach()
-                    # vis_global_input = tensor2image(temp_global_input)
-                    # vis_global_input = (vis_global_input+1)/2.
-
-                    temp_global_input = ref_gray.detach()
-                    vis_global_input = tensor2image(temp_global_input)
-                    vis_global_input = (vis_global_input+1)/2.
+                    if args.is_single_channel: # Return the local concatenation
+                        temp_global_input = global_input.detach()
+                        vis_global_input = tensor2image(temp_global_input)
+                        vis_global_input = (vis_global_input+1)/2.
+                    else: # Return the ref img
+                        temp_global_input = ref_gray.detach()
+                        vis_global_input = tensor2image(temp_global_input)
+                        vis_global_input = (vis_global_input+1)/2.
 
                     temp_global_fake = global_fake.detach()
                     vis_global_fake = tensor2image(temp_global_fake)
@@ -1355,8 +1371,11 @@ def ddp_main(rank, world_size, args):
                             "global_ae": model.module.global_ae.state_dict(),
                             "ae_discriminator": model.module.ae_discriminator.state_dict(),
                             "global_ema": model.module.global_ema.state_dict(),
-                            "global_ae_optim": global_ae_optim,
-                            "ae_d_optim": ae_d_optim,
+                            "local_left_optim": local_left_optim.state_dict(),
+                            "local_right_optim": local_right_optim.state_dict(),
+                            "local_mouth_optim": local_mouth_optim.state_dict(),
+                            "global_ae_optim": global_ae_optim.state_dict(),
+                            "ae_d_optim": ae_d_optim.state_dict(),
                             "train_args": args,
                             "cfg": cfg,
                         },
@@ -1713,12 +1732,13 @@ if __name__ == "__main__":
             "lsun/bedroom",
         ],
     )
-    parser.add_argument("--iter", type=int, default=30000)
+    parser.add_argument("--iter", type=int, default=60000)
     parser.add_argument("--ae_switch_iter", type=int, default=0) # MSE -> MSE+AD 
     parser.add_argument("--save_network_interval", type=int, default=3000) # Save the checkpoint every 50 iters
     parser.add_argument("--small_generator", action="store_true")
     parser.add_argument("--is_gray", action="store_true") # Only control if the ref is gray
     parser.add_argument("--has_edge", action="store_true") # Only control if the ref is gray
+    parser.add_argument("--is_single_channel", action="store_true")
     parser.add_argument("--batch", type=int, default=8, help="total batch sizes")
     parser.add_argument("--size", type=int, choices=[128, 256, 512, 1024], default=256)
     parser.add_argument("--r1", type=float, default=10)
@@ -1764,5 +1784,8 @@ if __name__ == "__main__":
 
     # Comment below to set has_edge as True
     # input_args.has_edge = not input_args.has_edge
+    
+    # Comment below to set is_single_channel as True
+    input_args.is_single_channel = not input_args.is_single_channel
 
     run(ddp_main, ngpus, input_args)

@@ -91,7 +91,8 @@ if __name__ == "__main__":
     is_ae = True
     is_gray = False
     is_global = False
-    
+    is_single_channel = False
+
     inference_model = None
 
     ckpt = torch.load(args.ckpt)
@@ -118,10 +119,10 @@ if __name__ == "__main__":
             local_pathway_mouth = LocalPathway(is_gray=True, use_batchnorm=train_cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
             local_pathway_mouth.eval()
             local_pathway_mouth.to(device)
-            local_fuser = LocalFuser()
+            local_fuser = LocalFuser(is_single_channel=is_single_channel)
             local_fuser.eval()
             local_fuser.to(device)
-            global_ae = GlobalPathway_1(is_gray=True, use_batchnorm=train_cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+            global_ae = GlobalPathway_1(is_gray=True, is_single_channel=is_single_channel, use_batchnorm=train_cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
             global_ae.eval()
             global_ae.to(device)
     else:
