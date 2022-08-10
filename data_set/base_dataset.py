@@ -6,9 +6,10 @@ from PIL import Image
 import os
 
 class BaseDataset(data.Dataset):
-    def __init__(self, is_global, list_path, set_, data_name, image_size, labels_size, mean=(128, 128, 128)):
+    def __init__(self, is_global, is_equal, list_path, set_, data_name, image_size, labels_size, mean=(128, 128, 128)):
         self.set = set_
         self.is_global = is_global
+        self.is_equal = is_equal
         self.data_name = data_name
         self.list_path = list_path
         self.image_size = image_size
@@ -48,29 +49,19 @@ class BaseDataset(data.Dataset):
             mask_file = os.path.join(name, 'mask.npy')
 
             if self.is_global:
-                self.files.append((reference_file, overlaid_file, gt_file,
+                if self.is_equal: # ref is equal to gt (same files as the local method)
+                    self.files.append((reference_file, gt_file, 
+                                    left_gray_patch_file, left_rgb_gt_file, right_gray_patch_file, right_rgb_gt_file,
+                                    mouth_gray_patch_file, mouth_rgb_gt_file,
+                                    mask_file, name))
+                else: # ref is not equal to gt
+                    self.files.append((reference_file, overlaid_file, gt_file,
                                 mask_file, name))
             else:
-                # self.files.append((reference_file, overlaid_file, label_file, 
-                #                     left_gray_patch_file, right_gray_patch_file, mouth_gray_patch_file,
-                #                     left_rgb_gt_file, right_rgb_gt_file, mouth_rgb_gt_file, mask_file, name))
                 self.files.append((reference_file, gt_file, 
                                     left_gray_patch_file, left_rgb_gt_file, right_gray_patch_file, right_rgb_gt_file,
                                     mouth_gray_patch_file, mouth_rgb_gt_file,
                                     mask_file, name))
-
-        # if max_iters is not None:
-        #     self.img_ids = self.img_ids * int(np.ceil(float(max_iters) / len(self.img_ids))) # ???
-        # self.files = []
-
-        # for name in self.img_ids:
-        #     if self.data_name != 'MESH':
-        #         img_file, label_file = self.get_metadata(name)
-        #         self.files.append((img_file, label_file, name))
-        #     else:
-        #         img_file = self.get_metadata(name)
-        #         self.files.append((img_file, name))
-
 
     def get_metadata(self, name):
         raise NotImplementedError
@@ -91,18 +82,10 @@ class BaseDataset(data.Dataset):
         '''
         Standardazation: (x-mean)/128.
         '''
-        # image = image[:, :, ::-1] # change to BGR???
-        
         image = image.astype(np.float32)
         # Standardazation
         image = image - self.mean_rgb
 
-        # # Normalization: [0, 1]
-        # image_max = np.max(image)
-        # image_min = np.min(image)
-        # image_range = image_max - image_min
-        # image = (image - image_min) / image_range
-        
         # Normalization: [-1, 1]
         image = image/128.
         final_image = image.transpose((2, 0, 1)) # to [c h w]
@@ -122,24 +105,6 @@ class BaseDataset(data.Dataset):
         img = img.resize((self.image_size, self.image_size)) # Resize the patch to the square size
         img_np = np.asarray(img)
         return img_np
-
-    # def get_gt_gray_patch(self, file, mask_pos_np):
-    #     img = Image.open(file)
-    #     img = img.convert('L')
-    #     v_min = np.min(mask_pos_np[0])
-    #     v_max = np.max(mask_pos_np[0])+1
-    #     u_min = np.min(mask_pos_np[1])
-    #     u_max = np.max(mask_pos_np[1])+1
-
-    #     new_img = img.crop((u_min, v_min, u_max, v_max))
-    #     new_img = new_img.resize((self.image_size, self.image_size))
-    #     new_img_np = np.asarray(new_img).astype(np.float32)
-    #     new_img_np -= self.mean_gray
-    #     new_img_np /= 128.
-    #     new_img_np = new_img_np[..., np.newaxis]
-    #     new_img_np = new_img_np.transpose((2, 0, 1))
-
-    #     return new_img_np
 
     def get_mask(self, file):
         raw_mask_np = np.load(file)

@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from matplotlib import gridspec
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-from training.model import Generator, LocalPathway, Encoder, GlobalPathway_1, LocalFuser
+from training.model import Generator, GlobalPathway_2, LocalPathway, Encoder, GlobalPathway_1, LocalFuser, GlobalPathway
 
 random.seed(0)
 torch.manual_seed(0)
@@ -89,9 +89,10 @@ if __name__ == "__main__":
     print('{} GPUs!'.format(ngpus))
 
     is_ae = True
-    is_gray = False
-    is_global = False
-    is_single_channel = False
+    is_gray = False # Only for GlobalPathway_2
+    is_global = True
+    is_single_channel = True # Only for local method
+    is_equal = True # Only for global method; True: GlobalPathway; False: GlobalPathway_2
 
     inference_model = None
 
@@ -106,7 +107,10 @@ if __name__ == "__main__":
                 global_gray_ae.eval()
                 global_gray_ae.to(device)
             else:
-                global_rgb_ae = LocalPathway(is_gray, use_batchnorm=train_cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+                if is_equal:
+                    global_rgb_ae = GlobalPathway(use_batchnorm=train_cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+                else:
+                    global_rgb_ae = GlobalPathway_2(use_batchnorm=train_cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
                 global_rgb_ae.eval()
                 global_rgb_ae.to(device)
         else:
@@ -320,7 +324,10 @@ if __name__ == "__main__":
                 fake_gray_global_img, fake_gray_global_feature = global_gray_ae(input_img)
                 fake_img = fake_gray_global_img
             else:
-                fake_rgb_global_img, fake_rgb_global_feature = global_rgb_ae(input_img, ref_img)
+                if is_equal:
+                    fake_rgb_global_img, fake_rgb_global_feature = global_rgb_ae(input_img)
+                else:
+                    fake_rgb_global_img, fake_rgb_global_feature = global_rgb_ae(input_img, ref_img)
                 fake_img = fake_rgb_global_img
         else:
             local_left_pred, _ = local_pathway_left_eye(local_left)
@@ -351,17 +358,18 @@ if __name__ == "__main__":
     vis_gt = tensor2image(temp_gt)
     vis_gt = (vis_gt+1)/2.
 
-    temp_left_pred = local_left_pred.detach()
-    vis_left_pred = tensor2image(temp_left_pred)
-    vis_left_pred = (vis_left_pred+1)/2.
+    if not is_global:
+        temp_left_pred = local_left_pred.detach()
+        vis_left_pred = tensor2image(temp_left_pred)
+        vis_left_pred = (vis_left_pred+1)/2.
 
-    temp_right_pred = local_right_pred.detach()
-    vis_right_pred = tensor2image(temp_right_pred)
-    vis_right_pred = (vis_right_pred+1)/2.
+        temp_right_pred = local_right_pred.detach()
+        vis_right_pred = tensor2image(temp_right_pred)
+        vis_right_pred = (vis_right_pred+1)/2.
 
-    temp_mouth_pred = local_mouth_pred.detach()
-    vis_mouth_pred = tensor2image(temp_mouth_pred)
-    vis_mouth_pred = (vis_mouth_pred+1)/2.
+        temp_mouth_pred = local_mouth_pred.detach()
+        vis_mouth_pred = tensor2image(temp_mouth_pred)
+        vis_mouth_pred = (vis_mouth_pred+1)/2.
 
     nrow = 2
     ncol = 3
@@ -391,26 +399,27 @@ if __name__ == "__main__":
     ax3.set_yticklabels([])
     ax3.axis('off')
 
-    ax4 = plt.subplot(gs[1, 0])
-    ax4.imshow(vis_left_pred)
-    ax4.title.set_text('Left pred')
-    ax4.set_xticklabels([])
-    ax4.set_yticklabels([])
-    ax4.axis('off')
+    if not is_global:
+        ax4 = plt.subplot(gs[1, 0])
+        ax4.imshow(vis_left_pred)
+        ax4.title.set_text('Left pred')
+        ax4.set_xticklabels([])
+        ax4.set_yticklabels([])
+        ax4.axis('off')
 
-    ax5 = plt.subplot(gs[1, 1])
-    ax5.imshow(vis_right_pred)
-    ax5.title.set_text('Right pred')
-    ax5.set_xticklabels([])
-    ax5.set_yticklabels([])
-    ax5.axis('off')
+        ax5 = plt.subplot(gs[1, 1])
+        ax5.imshow(vis_right_pred)
+        ax5.title.set_text('Right pred')
+        ax5.set_xticklabels([])
+        ax5.set_yticklabels([])
+        ax5.axis('off')
 
-    ax6 = plt.subplot(gs[1, 2])
-    ax6.imshow(vis_mouth_pred)
-    ax6.title.set_text('Mouth pred')
-    ax6.set_xticklabels([])
-    ax6.set_yticklabels([])
-    ax6.axis('off')
+        ax6 = plt.subplot(gs[1, 2])
+        ax6.imshow(vis_mouth_pred)
+        ax6.title.set_text('Mouth pred')
+        ax6.set_xticklabels([])
+        ax6.set_yticklabels([])
+        ax6.axis('off')
 
     test_save_path = os.path.join(args.save_image_dir, args.test_suffix)
     if not os.path.exists(test_save_path):

@@ -1258,18 +1258,7 @@ class LocalPathway(nn.Module):
             after_select1 = self.after_select1(deconv1)
             deconv2 = self.deconv2(after_select1)
             after_select2 = self.after_select2(deconv2)
-
-        # print('conv0 shape: ', conv0.shape)
-        # print('conv1 shape: ', conv1.shape)
-        # print('conv2 shape: ', conv2.shape)
-        # print('conv3 shape: ', conv3.shape)
-        # print('deconv0 shape: ', deconv0.shape)
-        # print('after_select0 shape: ', after_select0.shape)
-        # print('deconv1 shape: ', deconv1.shape)
-        # print('after_select1 shape: ', after_select1.shape)
-        # print('deconv2 shape: ', deconv2.shape)
-        # print('after_select2 shape: ', after_select2.shape)
-
+            
         local_img = self.local_img(after_select2)
 
         assert local_img.shape == x.shape, '{} {}'.format(local_img.shape, x.shape)        
@@ -1382,7 +1371,7 @@ class GlobalPathway_1(nn.Module):
 
 # Global fusion for global method
 class GlobalPathway_2(nn.Module):
-    def __init__(self, is_gray, use_batchnorm=True, is_skip=False, feature_layer_dim=64, fm_mult=1.0):
+    def __init__(self, use_batchnorm=True, is_skip=False, feature_layer_dim=64, fm_mult=1.0):
         super(GlobalPathway_2, self).__init__()
         n_fm_encoder = [64, 128, 256, 512]
         n_fm_decoder = [256, 128]
@@ -1391,10 +1380,7 @@ class GlobalPathway_2(nn.Module):
         self.is_skip = is_skip
 
         # Encoder
-        if not is_gray:
-            self.conv0 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
-        else:
-            self.conv0 = sequential(conv(1, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        self.conv0 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
         self.conv1 = sequential(conv(n_fm_encoder[0], n_fm_encoder[1], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[1], activation=nn.LeakyReLU()))
         self.conv2 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
         self.conv3 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
@@ -1425,13 +1411,9 @@ class GlobalPathway_2(nn.Module):
             self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
             self.after_select2 = sequential(conv(feature_layer_dim+0, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
         
-        if not is_gray:
-            self.local_img = conv(feature_layer_dim, 3, 1, 1, 0, None, None, False)
-        else:
-            self.local_img = conv(feature_layer_dim, 1, 1, 1, 0, None, None, False)
+        self.local_img = conv(feature_layer_dim, 3, 1, 1, 0, None, None, False)
 
     def forward(self, x, x_1): # x: overlaid; x_1: ref_img
-    # def forward(self, x):
         conv0 = self.conv0(x)
         conv1 = self.conv1(conv0)
         conv2 = self.conv2(conv1)
@@ -1443,7 +1425,6 @@ class GlobalPathway_2(nn.Module):
         conv3_1 = self.conv3_1(conv2_1)
 
         out = torch.cat((conv3, conv3_1), dim=1)
-        # out = conv3
 
         if self.is_skip:
             deconv0 = self.deconv0(out)
@@ -1460,27 +1441,12 @@ class GlobalPathway_2(nn.Module):
             deconv2 = self.deconv2(after_select1)
             after_select2 = self.after_select2(deconv2)
 
-        # print('conv0 shape: ', conv0.shape)
-        # print('conv1 shape: ', conv1.shape)
-        # print('conv2 shape: ', conv2.shape)
-        # print('conv3 shape: ', conv3.shape)
-        # print('deconv0 shape: ', deconv0.shape)
-        # print('after_select0 shape: ', after_select0.shape)
-        # print('deconv1 shape: ', deconv1.shape)
-        # print('after_select1 shape: ', after_select1.shape)
-        # print('deconv2 shape: ', deconv2.shape)
-        # print('after_select2 shape: ', after_select2.shape)
-
-        local_img = self.local_img(after_select2)
-
-        # print('local img shape: ', local_img.shape)
-        # print('x shape: ', x.shape)
-
-        # assert local_img.shape == x.shape, '{} {}'.format(local_img.shape, x.shape)        
+        local_img = self.local_img(after_select2)        
         return local_img, deconv2
 
+# Single branch for global method
 class GlobalPathway(nn.Module):
-    def __init__(self, is_gray, use_batchnorm=True, is_skip=False, feature_layer_dim=64, fm_mult=1.0):
+    def __init__(self, use_batchnorm=True, is_skip=False, feature_layer_dim=64, fm_mult=1.0):
         super(GlobalPathway, self).__init__()
         n_fm_encoder = [64, 128, 256, 512]
         n_fm_decoder = [256, 128]
@@ -1489,18 +1455,10 @@ class GlobalPathway(nn.Module):
         self.is_skip = is_skip
 
         # Encoder
-        if not is_gray:
-            self.conv0 = sequential(conv(4, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
-        else:
-            self.conv0 = sequential(conv(2, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
+        self.conv0 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
         self.conv1 = sequential(conv(n_fm_encoder[0], n_fm_encoder[1], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[1], activation=nn.LeakyReLU()))
         self.conv2 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
         self.conv3 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
-
-        self.conv0_1 = sequential(conv(3, n_fm_encoder[0], 3, 1, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[0], activation=nn.LeakyReLU()))
-        self.conv1_1 = sequential(conv(n_fm_encoder[0], n_fm_encoder[1], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[1], activation=nn.LeakyReLU()))
-        self.conv2_1 = sequential(conv(n_fm_encoder[1], n_fm_encoder[2], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[2], activation=nn.LeakyReLU()))
-        self.conv3_1 = sequential(conv(n_fm_encoder[2], n_fm_encoder[3], 3, 2, 1, 'kaiming', nn.LeakyReLU(1e-2), use_batchnorm), ResidualBlock(n_fm_encoder[3], activation=nn.LeakyReLU()))
 
         # Decoder
         if is_skip:
@@ -1523,23 +1481,14 @@ class GlobalPathway(nn.Module):
             self.deconv2 = deconv(self.after_select1.out_channels, feature_layer_dim, 3, 2, 1, 1, 'kaiming', nn.ReLU(), use_batchnorm)
             self.after_select2 = sequential(conv(feature_layer_dim+0, feature_layer_dim, 3, 1, 1, 'kaiming', nn.LeakyReLU(), use_batchnorm), ResidualBlock(feature_layer_dim, activation=nn.LeakyReLU()))
         
-        if not is_gray:
-            self.local_img = conv(feature_layer_dim, 3, 1, 1, 0, None, None, False)
-        else:
-            self.local_img = conv(feature_layer_dim, 1, 1, 1, 0, None, None, False)
+        self.local_img = conv(feature_layer_dim, 3, 1, 1, 0, None, None, False)
 
-    # def forward(self, x, x_1):
     def forward(self, x):
         conv0 = self.conv0(x)
         conv1 = self.conv1(conv0)
         conv2 = self.conv2(conv1)
         conv3 = self.conv3(conv2)
     
-        # conv0_1 = self.conv0_1(x_1)
-        # conv1_1 = self.conv1_1(conv0_1)
-        # conv2_1 = self.conv2_1(conv1_1)
-        # conv3_1 = self.conv3_1(conv2_1)
-
         # out = torch.cat((conv3, conv3_1), dim=1)
         out = conv3
 
@@ -1558,23 +1507,8 @@ class GlobalPathway(nn.Module):
             deconv2 = self.deconv2(after_select1)
             after_select2 = self.after_select2(deconv2)
 
-        # print('conv0 shape: ', conv0.shape)
-        # print('conv1 shape: ', conv1.shape)
-        # print('conv2 shape: ', conv2.shape)
-        # print('conv3 shape: ', conv3.shape)
-        # print('deconv0 shape: ', deconv0.shape)
-        # print('after_select0 shape: ', after_select0.shape)
-        # print('deconv1 shape: ', deconv1.shape)
-        # print('after_select1 shape: ', after_select1.shape)
-        # print('deconv2 shape: ', deconv2.shape)
-        # print('after_select2 shape: ', after_select2.shape)
-
         local_img = self.local_img(after_select2)
 
-        # print('local img shape: ', local_img.shape)
-        # print('x shape: ', x.shape)
-
-        # assert local_img.shape == x.shape, '{} {}'.format(local_img.shape, x.shape)        
         return local_img, deconv2
 
 class LocalFuser(nn.Module):
