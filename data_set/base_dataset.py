@@ -6,10 +6,11 @@ from PIL import Image
 import os
 
 class BaseDataset(data.Dataset):
-    def __init__(self, is_global, is_equal, list_path, set_, data_name, image_size, labels_size, mean=(128, 128, 128)):
+    def __init__(self, is_global, is_equal, is_temp, list_path, set_, data_name, image_size, labels_size, mean=(128, 128, 128)):
         self.set = set_
         self.is_global = is_global
         self.is_equal = is_equal
+        self.is_temp = is_temp
         self.data_name = data_name
         self.list_path = list_path
         self.image_size = image_size
@@ -31,8 +32,13 @@ class BaseDataset(data.Dataset):
                 temp_name = name[30:]
                 name = os.path.join(self.list_path, temp_name)
             elif name[:4] == '/nfs':
-                temp_name = name[35:]
-                name = os.path.join(self.list_path, temp_name)
+                if self.is_temp:
+                    # temp_name = name[38:] # for temp_FDC
+                    temp_name = name[40:] # for temp_FDC_1
+                    name = os.path.join(self.list_path, temp_name)
+                else:
+                    temp_name = name[35:]
+                    name = os.path.join(self.list_path, temp_name)
 
             reference_file = os.path.join(name, 'reference.png')
             overlaid_file = os.path.join(name, 'overlaid.png')
@@ -50,10 +56,14 @@ class BaseDataset(data.Dataset):
 
             if self.is_global:
                 if self.is_equal: # ref is equal to gt (same files as the local method)
-                    self.files.append((reference_file, gt_file, 
-                                    left_gray_patch_file, left_rgb_gt_file, right_gray_patch_file, right_rgb_gt_file,
-                                    mouth_gray_patch_file, mouth_rgb_gt_file,
-                                    mask_file, name))
+                    if self.is_temp:
+                        self.files.append((overlaid_file, gt_file)) # Only return the overlaid and gt
+                    else:
+                        self.files.append((reference_file, gt_file, 
+                                        left_gray_patch_file, left_rgb_gt_file, right_gray_patch_file, right_rgb_gt_file,
+                                        mouth_gray_patch_file, mouth_rgb_gt_file,
+                                        mask_file, name))                    
+
                 else: # ref is not equal to gt
                     self.files.append((reference_file, overlaid_file, gt_file,
                                 mask_file, name))

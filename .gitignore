@@ -6,6 +6,7 @@ metrics/pt_inception-2015-12-05-6726825d.pth
 metrics/fid_stats/
 stylegan2-ffhq-config-f*
 archive/
+celeba_hq_lmdb_data/
 
 # Demo
 **/__pycache__/

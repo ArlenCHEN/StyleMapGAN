@@ -1593,6 +1593,163 @@ class LocalFuser(nn.Module):
 
         return final_out
 
+import numpy as np
+import os
+import cv2
+
+class LocalFuser_1(nn.Module):
+    def __init__(self, local_parent_path):
+        super(LocalFuser_1, self).__init__()
+        self.counter = 0
+        self.local_parent_path = local_parent_path
+        self.split_file = os.path.join(local_parent_path, 'global_train.txt')
+
+    def paste_local_patch(self, overlaid, patch, mask, pos):
+        patch = np.squeeze(patch) # Remove redundant dimension
+        if overlaid.shape[0]==3:
+            overlaid = np.transpose(overlaid, (1,2,0))
+
+        if pos == 'left':
+            mask_pos = np.where(mask==1)
+        elif pos == 'right':
+            mask_pos = np.where(mask==2)
+        elif pos == 'mouth':
+            mask_pos = np.where(mask==3)
+
+        v_min = np.min(mask_pos[0])
+        v_max = np.max(mask_pos[0])
+        u_min = np.min(mask_pos[1])
+        u_max = np.max(mask_pos[1])
+
+        h = v_max - v_min 
+        w = u_max - u_min
+
+        patch = (patch+1)/2.
+        patch_img = Image.fromarray((255*patch).astype(np.uint8))
+        patch_img = patch_img.resize((w, h), Image.BILINEAR)
+        patch_np = np.asarray(patch_img).astype(np.float32)
+        patch_np = (patch_np-128.)/128.
+
+        repeat_patch_np = np.repeat(patch_np[:,:,np.newaxis], 3, axis=2)
+        overlaid[v_min:v_max, u_min:u_max] = repeat_patch_np
+
+        return overlaid
+
+    def forward(self, f_left_eye, f_right_eye, f_mouth, gt_rgb, mask):
+        f_left_eye = f_left_eye.detach().cpu().numpy()
+        f_right_eye = f_right_eye.detach().cpu().numpy()
+        f_mouth = f_mouth.detach().cpu().numpy()
+        gt_rgb = gt_rgb.detach().cpu().numpy()
+        mask = mask.detach().cpu().numpy()
+
+        batch_size = mask.shape[0]
+        for i in range(batch_size):
+            temp_f_left = f_left_eye[i]
+            temp_f_right = f_right_eye[i]
+            temp_f_mouth = f_mouth[i]
+            temp_gt = gt_rgb[i]
+            temp_mask = mask[i]
+            temp_overlaid = deepcopy(temp_gt)
+            
+            # Paste left patch
+            temp_overlaid = self.paste_local_patch(temp_overlaid, temp_f_left, temp_mask, 'left')
+            # Paste right patch
+            temp_overlaid = self.paste_local_patch(temp_overlaid, temp_f_right, temp_mask, 'right')
+            # Paste mouth patch
+            temp_overlaid = self.paste_local_patch(temp_overlaid, temp_f_mouth, temp_mask, 'mouth')
+
+            new_local_parent_path = os.path.join(self.local_parent_path, str(self.counter))
+
+            if not os.path.exists(new_local_parent_path):
+                os.mkdir(new_local_parent_path)
+
+            with open(self.split_file, 'a') as f:
+                f.write(new_local_parent_path)
+                f.write('\n')
+            f.close()
+
+            new_overlaid_path = os.path.join(new_local_parent_path, 'overlaid.png')
+            gt_path = os.path.join(new_local_parent_path, 'gt.png') # rgb gt
+
+            if temp_gt.shape[0] == 3:
+                temp_gt = np.transpose(temp_gt, (1,2,0))
+
+            # Conver array to format of np.uint8 [0, 255]
+            temp_overlaid = (temp_overlaid+1)/2.
+            temp_overlaid = (255*temp_overlaid).astype(np.uint8)
+            temp_overlaid = cv2.cvtColor(temp_overlaid, cv2.COLOR_RGB2BGR)
+            
+            temp_gt = (temp_gt+1)/2.
+            temp_gt = (255*temp_gt).astype(np.uint8)
+            temp_gt = cv2.cvtColor(temp_gt, cv2.COLOR_RGB2BGR)
+
+            cv2.imwrite(new_overlaid_path, temp_overlaid)
+            cv2.imwrite(gt_path, temp_gt)
+
+            self.counter+=1
+
+from PIL import Image
+from copy import deepcopy
+
+def global_fuser(left_eye_np, right_eye_np, mouth_np, gt_np, mask):
+    
+    global_input = deepcopy(gt_np)
+    mask_left_pos = np.where(mask==1)
+    left_v_min = np.min(mask_left_pos[0])
+    left_v_max = np.max(mask_left_pos[0])
+    left_u_min = np.min(mask_left_pos[1])
+    left_u_max = np.max(mask_left_pos[1])
+
+    left_eye_h = left_v_max - left_v_min 
+    left_eye_w = left_u_max - left_u_min
+
+    left_eye_img = Image.fromarray((255*left_eye_np).astype(np.uint8))
+    left_eye_img = left_eye_img.resize((left_eye_w, left_eye_h), Image.BILINEAR)
+    left_eye_np = np.asarray(left_eye_img).astype(np.float32)
+    left_eye_np = (left_eye_np-128.)/128.
+
+    repeat_left_eye_np = np.repeat(left_eye_np[:,:,np.newaxis], 3, axis=2)
+    global_input[left_v_min:left_v_max, left_u_min:left_u_max] = repeat_left_eye_np
+
+    mask_right_pos = np.where(mask==2)
+    right_v_min = np.min(mask_right_pos[0])
+    right_v_max = np.max(mask_right_pos[0])
+    right_u_min = np.min(mask_right_pos[1])
+    right_u_max = np.max(mask_right_pos[1])
+
+    right_eye_h = right_v_max - right_v_min 
+    right_eye_w = right_u_max - right_u_min
+
+    right_eye_img = Image.fromarray((255*right_eye_np).astype(np.uint8))
+    right_eye_img = right_eye_img.resize((right_eye_w, right_eye_h), Image.BILINEAR)
+    right_eye_np = np.asarray(right_eye_img).astype(np.float32)
+    right_eye_np = (right_eye_np-128.)/128.
+
+    repeat_right_eye_np = np.repeat(right_eye_np[:,:,np.newaxis], 3, axis=2)
+    global_input[right_v_min:right_v_max, right_u_min:right_u_max] = repeat_right_eye_np
+
+    mask_mouth_pos = np.where(mask==3)
+    mouth_v_min = np.min(mask_mouth_pos[0])
+    mouth_v_max = np.max(mask_mouth_pos[0])
+    mouth_u_min = np.min(mask_mouth_pos[1])
+    mouth_u_max = np.max(mask_mouth_pos[1])
+
+    mouth_h = mouth_v_max - mouth_v_min 
+    mouth_w = mouth_u_max - mouth_u_min
+
+    mouth_img = Image.fromarray((255*mouth_np).astype(np.uint8))
+    mouth_img = mouth_img.resize((mouth_w, mouth_h), Image.BILINEAR)
+    mouth_np = np.asarray(mouth_img).astype(np.float32)
+    mouth_np = (mouth_np-128.)/128.
+
+    repeat_mouth_np = np.repeat(mouth_np[:,:,np.newaxis], 3, axis=2)
+    global_input[mouth_v_min:mouth_v_max, mouth_u_min:mouth_u_max] = repeat_mouth_np
+
+    global_input = np.transpose(global_input, (2,0,1))
+    
+    # The result to be returned is a three-channel numpy image
+    return global_input
+
 import torch
 import torch.nn as nn
 import numpy as np

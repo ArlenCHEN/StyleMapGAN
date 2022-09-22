@@ -7,8 +7,9 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils import data
 from torchvision.datasets import ImageFolder
+from skimage.metrics import structural_similarity
 
-# from data_set import FDCDataset
+# from data_set.fdc import FDCDataset
 
 import numpy as np
 import random
@@ -23,6 +24,7 @@ from matplotlib import gridspec
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from training.model import Generator, GlobalPathway_2, LocalPathway, Encoder, GlobalPathway_1, LocalFuser, GlobalPathway
+from training.model import global_fuser
 
 random.seed(0)
 torch.manual_seed(0)
@@ -65,12 +67,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--ckpt", required=True)
+    parser.add_argument("--ckpt_global", type=str) # Provide the trained global model
     parser.add_argument("--img_path", type=str, required=True)
+    parser.add_argument("--local_img_path", type=str) # Provide different local patches
     parser.add_argument("--save_name", type=str, required=True)
 
     parser.add_argument("--test_suffix", type=str, default='test_global_rgb')
     parser.add_argument("--num_workers", type=int, default=10)
-    parser.add_argument("--save_image_dir", type=str, default='expr')
+    parser.add_argument("--save_image_dir", type=str, default='/nfs/STG/Audio2FacePose/MEAD/Experiments/StyleMapGAN/expr')
     parser.add_argument("--mode", type=str, default='test')
     parser.add_argument("--input_name", type=str, default='overlaid.png')
     parser.add_argument("--gt_name", type=str, default='gt.png')
@@ -85,11 +89,13 @@ if __name__ == "__main__":
     parser.add_argument("--image_size", type=int, default=256)
     args = parser.parse_args()
 
+    args.local_img_path = args.img_path
+    
     ngpus = torch.cuda.device_count()
     print('{} GPUs!'.format(ngpus))
 
     is_ae = True
-    is_gray = False # Only for GlobalPathway_2
+    is_gray = False # Can be deprecated
     is_global = True
     is_single_channel = True # Only for local method
     is_equal = True # Only for global method; True: GlobalPathway; False: GlobalPathway_2
@@ -97,6 +103,9 @@ if __name__ == "__main__":
     inference_model = None
 
     ckpt = torch.load(args.ckpt)
+
+    if args.ckpt_global:
+        ckpt_global = torch.load(args.ckpt_global)
 
     if is_ae:
         train_args = ckpt['train_args']
@@ -123,12 +132,19 @@ if __name__ == "__main__":
             local_pathway_mouth = LocalPathway(is_gray=True, use_batchnorm=train_cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
             local_pathway_mouth.eval()
             local_pathway_mouth.to(device)
-            local_fuser = LocalFuser(is_single_channel=is_single_channel)
-            local_fuser.eval()
-            local_fuser.to(device)
-            global_ae = GlobalPathway_1(is_gray=True, is_single_channel=is_single_channel, use_batchnorm=train_cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
-            global_ae.eval()
-            global_ae.to(device)
+
+            # Use the global method
+            global_rgb_ae = GlobalPathway(use_batchnorm=train_cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+            global_rgb_ae.eval()
+            global_rgb_ae.to(device)
+
+            # # Original global fusion for local method
+            # local_fuser = LocalFuser(is_single_channel=is_single_channel)
+            # local_fuser.eval()
+            # local_fuser.to(device)
+            # global_ae = GlobalPathway_1(is_gray=True, is_single_channel=is_single_channel, use_batchnorm=train_cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
+            # global_ae.eval()
+            # global_ae.to(device)
     else:
         train_args = ckpt['train_args']
         generator = Generator(
@@ -164,7 +180,11 @@ if __name__ == "__main__":
             local_pathway_left_eye.load_state_dict(ckpt["local_pathway_left_eye"])
             local_pathway_right_eye.load_state_dict(ckpt["local_pathway_right_eye"])
             local_pathway_mouth.load_state_dict(ckpt["local_pathway_mouth"])
-            global_ae.load_state_dict(ckpt["global_ae"])
+
+            # # Original global model for local method
+            # global_ae.load_state_dict(ckpt["global_ae"])
+
+            global_rgb_ae.load_state_dict(ckpt_global["global_rgb_ae"])
     else:
         generator.load_state_dict(ckpt["generator"])
         encoder.load_state_dict(ckpt["encoder"])
@@ -190,37 +210,37 @@ if __name__ == "__main__":
     gt_img = gt_img.resize((args.image_size, args.image_size), Image.BICUBIC)
     gt_img = np.asarray(gt_img, np.float32)
     
-    local_left_img = Image.open(os.path.join(args.img_path, args.local_left_name))
+    local_left_img = Image.open(os.path.join(args.local_img_path, args.local_left_name))
     local_left_img = local_left_img.convert('L')
     local_left_img = local_left_img.resize((args.image_size, args.image_size), Image.BICUBIC)
     local_left_np = np.asarray(local_left_img, np.float32)
     local_left_np = local_left_np[..., np.newaxis]
 
-    left_gt_img = Image.open(os.path.join(args.img_path, args.left_gt_name))
+    left_gt_img = Image.open(os.path.join(args.local_img_path, args.left_gt_name))
     left_gt_img = left_gt_img.convert('L')
     left_gt_img = left_gt_img.resize((args.image_size, args.image_size), Image.BICUBIC)
     left_gt_np = np.asarray(left_gt_img, np.float32)
     left_gt_np = left_gt_np[..., np.newaxis]
 
-    local_right_img = Image.open(os.path.join(args.img_path, args.local_right_name))
+    local_right_img = Image.open(os.path.join(args.local_img_path, args.local_right_name))
     local_right_img = local_right_img.convert('L')
     local_right_img = local_right_img.resize((args.image_size, args.image_size), Image.BICUBIC)
     local_right_np = np.asarray(local_right_img, np.float32)
     local_right_np = local_right_np[..., np.newaxis]
 
-    right_gt_img = Image.open(os.path.join(args.img_path, args.right_gt_name))
+    right_gt_img = Image.open(os.path.join(args.local_img_path, args.right_gt_name))
     right_gt_img = right_gt_img.convert('L')
     right_gt_img = right_gt_img.resize((args.image_size, args.image_size), Image.BICUBIC)
     right_gt_np = np.asarray(right_gt_img, np.float32)
     right_gt_np = right_gt_np[..., np.newaxis]
 
-    local_mouth_img = Image.open(os.path.join(args.img_path, args.local_mouth_name))
+    local_mouth_img = Image.open(os.path.join(args.local_img_path, args.local_mouth_name))
     local_mouth_img = local_mouth_img.convert('L')
     local_mouth_img = local_mouth_img.resize((args.image_size, args.image_size), Image.BICUBIC)
     local_mouth_np = np.asarray(local_mouth_img, np.float32)
     local_mouth_np = local_mouth_np[..., np.newaxis]
     
-    mouth_gt_img = Image.open(os.path.join(args.img_path, args.mouth_gt_name))
+    mouth_gt_img = Image.open(os.path.join(args.local_img_path, args.mouth_gt_name))
     mouth_gt_img = mouth_gt_img.convert('L')
     mouth_gt_img = mouth_gt_img.resize((args.image_size, args.image_size), Image.BICUBIC)
     mouth_gt_np = np.asarray(mouth_gt_img, np.float32)
@@ -329,26 +349,62 @@ if __name__ == "__main__":
                 else:
                     fake_rgb_global_img, fake_rgb_global_feature = global_rgb_ae(input_img, ref_img)
                 fake_img = fake_rgb_global_img
+            mask = mask.detach()
+            mask = tensor2image(mask)
         else:
             local_left_pred, _ = local_pathway_left_eye(local_left)
             local_right_pred, _ = local_pathway_right_eye(local_right)
             local_mouth_pred, _ = local_pathway_mouth(local_mouth)
+            
+            temp_left_pred = local_left_pred.detach()
+            vis_left_pred = tensor2image(temp_left_pred)
+            vis_left_pred = (vis_left_pred+1)/2.
 
-            local_fused = local_fuser(local_left_pred, local_right_pred, local_mouth_pred, mask)
-            # local_fused = local_fuser(left_gt, right_gt, mouth_gt, ref_gray, mask)
+            temp_right_pred = local_right_pred.detach()
+            vis_right_pred = tensor2image(temp_right_pred)
+            vis_right_pred = (vis_right_pred+1)/2.
 
-            # global_input = torch.cat((local_fused, ref_gray), dim=1)
-            print('Max value in local fused: ', torch.max(local_fused))
-            print('Min value in local fused: ', torch.min(local_fused))
-            fake_pred, _ = global_ae(ref_gray, local_fused)
-            fake_img = fake_pred
+            temp_mouth_pred = local_mouth_pred.detach()
+            vis_mouth_pred = tensor2image(temp_mouth_pred)
+            vis_mouth_pred = (vis_mouth_pred+1)/2.
+            
+            temp_gt = gt_img.detach()
+            vis_gt = tensor2image(temp_gt)
+
+            mask = mask.detach()
+            mask = tensor2image(mask)
+
+            # global fusion from global method
+            global_input = global_fuser(vis_left_pred, vis_right_pred, vis_mouth_pred, vis_gt, mask)
+            
+            global_input_np = deepcopy(global_input)
+            global_input_np = np.transpose(global_input_np, (1,2,0)) # convert from torch format to numpy format
+
+            global_input = torch.tensor(global_input)
+            global_input = global_input.unsqueeze(0)
+            global_input = global_input.to(device)
+
+            fake_rgb_global_img, fake_rgb_global_feature = global_rgb_ae(global_input)
+            fake_img = fake_rgb_global_img
+
+            # # Original global fusion for local method
+            # local_fused = local_fuser(local_left_pred, local_right_pred, local_mouth_pred, mask)
+            # # local_fused = local_fuser(left_gt, right_gt, mouth_gt, ref_gray, mask)
+
+            # # global_input = torch.cat((local_fused, ref_gray), dim=1)
+            # print('Max value in local fused: ', torch.max(local_fused))
+            # print('Min value in local fused: ', torch.min(local_fused))
+            # fake_pred, _ = global_ae(ref_gray, local_fused)
+            # fake_img = fake_pred
     else:
         fake_stylecode = encoder(input_img)
         fake_img, _ = generator(fake_stylecode, input_is_stylecode=True)
 
     temp_input = input_img.detach()
-    vis_input = tensor2image(temp_input)
-    vis_input = (vis_input+1)/2.
+    vis_input_np = tensor2image(temp_input)
+    if not is_global:
+        vis_input_np = global_input_np # Visualize the new overlaid image, only when local method is used
+    vis_input = (vis_input_np+1)/2.
 
     temp_fake = fake_img.detach()
     vis_fake = tensor2image(temp_fake)
@@ -358,18 +414,46 @@ if __name__ == "__main__":
     vis_gt = tensor2image(temp_gt)
     vis_gt = (vis_gt+1)/2.
 
-    if not is_global:
-        temp_left_pred = local_left_pred.detach()
-        vis_left_pred = tensor2image(temp_left_pred)
-        vis_left_pred = (vis_left_pred+1)/2.
+    assert vis_fake.shape == vis_gt.shape
+    binary_mask = np.zeros(mask.shape).astype(int)
+    binary_mask[mask!=255] = 1
+    num_pixel_in = np.count_nonzero(binary_mask==1)
+    num_pixel_out = np.count_nonzero(binary_mask==0)
+    error = vis_gt - vis_fake
+    SE = error**2
+    SE = np.sum(SE, axis=2)
+    SE_in = SE*binary_mask
+    SE_out = SE*(1-binary_mask)
+    MSE = np.mean(SE)
+    MSE_in = np.sum(SE_in) / num_pixel_in
+    MSE_out = np.sum(SE_out) / num_pixel_out
+    print('MSE: ', MSE)
+    print('MSE_in: ', MSE_in)
+    print('MSE_out: ', MSE_out)
 
-        temp_right_pred = local_right_pred.detach()
-        vis_right_pred = tensor2image(temp_right_pred)
-        vis_right_pred = (vis_right_pred+1)/2.
+    # SSIM
+    fake_gray = cv2.cvtColor(vis_fake, cv2.COLOR_BGR2GRAY)
+    gt_gray = cv2.cvtColor(vis_gt, cv2.COLOR_BGR2GRAY)
+    (score, diff) = structural_similarity(fake_gray, gt_gray, full=True)
+    print('SSIM: ', score)
 
-        temp_mouth_pred = local_mouth_pred.detach()
-        vis_mouth_pred = tensor2image(temp_mouth_pred)
-        vis_mouth_pred = (vis_mouth_pred+1)/2.
+    # PSNR
+    new_fake = deepcopy(vis_fake)
+    new_gt = deepcopy(vis_gt)
+    new_fake = (255*new_fake).astype(np.uint8)
+    new_gt = (255*new_gt).astype(np.uint8)
+    psnr = cv2.PSNR(new_fake, new_gt)
+    print('PSNR: ', psnr)
+
+    # LPIPS
+    from training import lpips
+    lpips_loss = lpips.exportPerceptualLoss(
+            model="net-lin", net="vgg", use_gpu=device.startswith("cuda")
+        )
+    lpips_loss.to(device)
+    d = lpips_loss(fake_img, gt_img).mean().item()
+    print('LPIPS: ', d)
+    input()
 
     nrow = 2
     ncol = 3

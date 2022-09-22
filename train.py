@@ -11,6 +11,7 @@ Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
 import argparse
 from operator import truediv
 import os
+import pstats
 from sysconfig import get_scheme_names
 from tkinter import N
 import torch
@@ -22,7 +23,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchvision import transforms
 from training import lpips
-from training.model import Generator, Discriminator, Encoder, LocalPathway, LocalFuser, GlobalPathway, GlobalPathway_1, GlobalPathway_2, CannyFilter
+from training.model import Generator, Discriminator, Encoder, LocalPathway, LocalFuser, LocalFuser_1, GlobalPathway, GlobalPathway_1, GlobalPathway_2, CannyFilter
 from training.dataset_ddp import MultiResolutionDataset
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
@@ -69,11 +70,8 @@ def tensor2image(im_tensor):
 
 def setup(rank, world_size):
     os.environ["MASTER_ADDR"] = "localhost"
-    # os.environ["MASTER_PORT"] = "12355" # CUDA=7
-    # os.environ["MASTER_PORT"] = "12356" #CUDA=4
-    # os.environ["MASTER_PORT"] = "12357" # CUDA=6
-    os.environ["MASTER_PORT"] = "12358" # CUDA=5
-    # os.environ["MASTER_PORT"] = "12359" # CUDA=3
+    # os.environ["MASTER_PORT"] = "12356" 
+    os.environ["MASTER_PORT"] = "12358" 
 
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
@@ -215,8 +213,6 @@ class DDPModel(nn.Module):
                 else: # Multiple branches
                     self.global_rgb_ae = GlobalPathway_2(use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
                     self.global_ema = GlobalPathway_2(use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
-                self.edge_detector = CannyFilter()
-                self.edge_detector.eval()
 
                 self.ae_discriminator = Discriminator(
                     args.is_gray, args.size, channel_multiplier=args.channel_multiplier
@@ -226,10 +222,9 @@ class DDPModel(nn.Module):
             self.local_pathway_right_eye = LocalPathway(is_gray=True, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
             self.local_pathway_mouth = LocalPathway(is_gray=True, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
             self.local_fuser = LocalFuser(is_single_channel=args.is_single_channel)
+            self.local_fuser_1 = LocalFuser_1(local_parent_path=args.local_parent_path)
             self.global_ae = GlobalPathway_1(is_gray=args.is_gray, is_single_channel=args.is_single_channel, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
             self.global_ema = GlobalPathway_1(is_gray=args.is_gray, is_single_channel=args.is_single_channel, use_batchnorm=cfg.TRAIN.GRAY2RGB_USE_BATCHNORM)
-            # self.edge_detector = CannyFilter()
-            # self.edge_detector.eval()
             self.ae_discriminator = Discriminator(
                 args.is_gray, args.size, channel_multiplier=args.channel_multiplier
             )
@@ -242,6 +237,7 @@ class DDPModel(nn.Module):
                 self.args.latent_channel_size,
                 self.device,
             )
+            gt = real_img # Input is the gt image
 
             fake_img, stylecode = self.generator(z, return_stylecode=True)
             fake_pred = self.discriminator(fake_img)
@@ -251,9 +247,11 @@ class DDPModel(nn.Module):
             # fake_stylecode = self.encoder(fake_img)
             # w_rec_loss = self.mse_loss(stylecode, fake_stylecode)
 
+            # x_rec_loss = self.mse_loss(gt, fake_img)
+            # perceptual_loss = self.percept(gt, fake_img).mean()
+
             # return adv_loss, w_rec_loss, stylecode, fake_stylecode, fake_img
             return adv_loss, stylecode, fake_img
-
         elif mode == "D":
             with torch.no_grad():
                 z = make_noise(
@@ -347,9 +345,13 @@ class DDPModel(nn.Module):
             return global_side_fake, global_side_feature, global_side_rec_loss, global_side_perceptual_loss
         elif mode == 'global_rgb_ae_ad': # Global method
             # Input is the overlaid image with the raw side patches
-            global_side_rgb = real_img[0]
-            global_ref_rgb = real_img[1]
-            global_rgb_gt = real_img[2]
+            if self.args.is_temp:
+                global_side_rgb = real_img[0]
+                global_rgb_gt = real_img[1]
+            else:
+                global_side_rgb = real_img[0]
+                global_ref_rgb = real_img[1]
+                global_rgb_gt = real_img[2]
             
             if self.args.is_equal:
                 global_side_fake, global_side_feature = self.global_rgb_ae(global_side_rgb)
@@ -359,19 +361,6 @@ class DDPModel(nn.Module):
             fake_pred = self.ae_discriminator(global_side_fake)
             global_adv_loss = g_nonsaturating_loss(fake_pred)
             global_side_rec_loss = self.mse_loss(global_rgb_gt, global_side_fake)
-            
-            # pred_edge = self.edge_detector(global_side_fake)
-            # gt_edge = self.edge_detector(global_rgb_gt)
-            # gt_edge = gt_edge.detach()
-
-            # print('max value in pred_edge: ', torch.max(pred_edge))
-            # print('min value in pred_edge: ', torch.min(pred_edge))
-            # print('max value in gt_edge: ', torch.max(gt_edge))
-            # print('min value in gt_edge: ', torch.min(gt_edge))
-
-            # edge_mse_loss = self.mse_loss(pred_edge, gt_edge).mean()
-
-            # print('edge mse loss: ', edge_mse_loss)
 
             global_side_perceptual_loss = self.percept(global_rgb_gt, global_side_fake).mean()
             return global_side_fake, global_side_feature, global_side_rec_loss, global_side_perceptual_loss, global_adv_loss
@@ -384,6 +373,18 @@ class DDPModel(nn.Module):
             # local_fused = self.local_fuser(left_eye, right_eye, mouth, ref_gray, mask)
             local_fused = self.local_fuser(left_eye, right_eye, mouth, mask)
             return local_fused
+        elif mode == 'local_fusion_1':
+            left_eye = real_img[0]
+            right_eye = real_img[1]
+            mouth = real_img[2]
+            mask = real_img[3]
+            # ref_gray = real_img[4]
+            gt_rgb = real_img[4]
+
+            # local_fused = self.local_fuser(left_eye, right_eye, mouth, ref_gray, mask)
+            local_fused = self.local_fuser_1(left_eye, right_eye, mouth, gt_rgb, mask)
+            return local_fused
+            
         elif mode == 'global_ae_ad': # Local method
             local_fused = real_img[0] # gray
             global_ref_gray = real_img[1]
@@ -410,9 +411,6 @@ class DDPModel(nn.Module):
                 global_perceptual_loss = self.percept(global_gt_gray, global_fake).mean()
 
                 if self.args.has_edge:
-                    # pred_edge = self.edge_detector(global_fake)
-                    # gt_edge = self.edge_detector(global_gt_gray)
-                    
                     pred_edge = K.filters.sobel(global_fake)
                     gt_edge = K.filters.sobel(global_gt_gray)
 
@@ -441,7 +439,11 @@ class DDPModel(nn.Module):
 
             return global_side_fake, global_side_feature, global_side_rec_loss, global_side_perceptual_loss
         elif mode == 'ae_D':
-            global_side_rgb, global_ref_rgb, global_rgb_gt = real_img[0], real_img[1], real_img[2]
+            if self.args.is_temp:
+                global_side_rgb, global_rgb_gt = real_img[0], real_img[1]
+            else:
+                global_side_rgb, global_ref_rgb, global_rgb_gt = real_img[0], real_img[1], real_img[2]
+                
             with torch.no_grad():
                 if self.args.is_equal:
                     global_fake, global_fake_feature = self.global_rgb_ae(global_side_rgb)
@@ -528,11 +530,6 @@ def ddp_main(rank, world_size, args):
     is_celeba = False
     is_debugging = False
     is_tensorboard = True
-    # is_gray_2_rgb = True
-
-    # is_ae = args.is_ae # Use autoencoder structure
-    # is_gray = args.is_gray # If the ref in local method is gray or not
-    # is_global = args.is_global # Is the input small patch or a whole face
 
     global cfg
 
@@ -658,8 +655,9 @@ def ddp_main(rank, world_size, args):
                 model.module.global_rgb_ae.load_state_dict(ckpt["global_rgb_ae"])
                 model.module.ae_discriminator.load_state_dict(ckpt["ae_discriminator"])
                 model.module.global_ema.load_state_dict(ckpt['global_ema'])
-                global_rgb_ae_optim.load_state_dict(ckpt['global_rgb_ae_optim'])
-                ae_d_optim.load_state_dict(ckpt['ae_d_optim'])
+                #TODO: uncomment below
+                # global_rgb_ae_optim.load_state_dict(ckpt['global_rgb_ae_optim'])
+                # ae_d_optim.load_state_dict(ckpt['ae_d_optim'])
             else:
                 model.module.local_pathway_left_eye.load_state_dict(ckpt['local_pathway_left_eye'])
                 model.module.local_pathway_right_eye.load_state_dict(ckpt['local_pathway_right_eye'])
@@ -685,6 +683,19 @@ def ddp_main(rank, world_size, args):
 
         del ckpt  # free GPU memory
 
+    # Load local models for generating local predictions
+    print('ckpt_local: ', args.ckpt_local)
+
+    if args.ckpt_local:
+        ckpt_local = torch.load(args.ckpt_local, map_location=map_location)
+        model.module.local_pathway_left_eye.load_state_dict(ckpt_local["local_pathway_left_eye"])
+        model.module.local_pathway_right_eye.load_state_dict(ckpt_local["local_pathway_right_eye"])
+        model.module.local_pathway_mouth.load_state_dict(ckpt_local["local_pathway_mouth"])
+        model.module.local_pathway_left_eye.eval()
+        model.module.local_pathway_right_eye.eval()
+        model.module.local_pathway_mouth.eval()
+        del ckpt_local
+
     transform = transforms.Compose(
         [
             transforms.RandomHorizontalFlip(),
@@ -693,7 +704,7 @@ def ddp_main(rank, world_size, args):
         ]
     )
 
-    save_dir = "expr"
+    save_dir = args.expr
     os.makedirs(save_dir, 0o777, exist_ok=True)
     os.makedirs(save_dir + "/checkpoints/" + args.suffix, 0o777, exist_ok=True)
 
@@ -724,8 +735,10 @@ def ddp_main(rank, world_size, args):
 
         local_transforms = None
         gray_ref_transforms = None
-        train_dataset = FDCDataset(args.is_global, args.is_equal, list_path=args.list_path, local_transforms=local_transforms, gray_ref_transforms=gray_ref_transforms, set='train')
-        # val_dataset = FDCDataset(is_global, list_path=args.list_path, set='val')
+        if args.is_temp:
+            train_dataset = FDCDataset(args.is_global, args.is_equal, args.is_temp, list_path=args.list_path, local_transforms=local_transforms, gray_ref_transforms=gray_ref_transforms, set='global_train')
+        else:
+            train_dataset = FDCDataset(args.is_global, args.is_equal, args.is_temp, list_path=args.list_path, local_transforms=local_transforms, gray_ref_transforms=gray_ref_transforms, set='train')
 
     if is_celeba:
         print(f"train_dataset: {len(train_dataset)}, val_dataset: {len(val_dataset)}")
@@ -814,19 +827,29 @@ def ddp_main(rank, world_size, args):
             real_img = real_img.to(map_location) # Using celeba dataset
         else: # FDC data
             if args.is_global:
-                batch_list = train_iter.__next__()
-                temp_batch = batch_list[1]
-                ref_rgb, overlaid_rgb, gt_rgb, mask = temp_batch
-                ref_rgb = ref_rgb.to(map_location)
-                overlaid_rgb = overlaid_rgb.to(map_location)
-                gt_rgb = gt_rgb.to(map_location)
-                if overlaid_rgb.shape[0] != args.batch:
-                    print(f'Data batch wrong---{real_img.shape[0]}, continue...')
-                    continue
+                if args.is_temp:
+                    batch_list = train_iter.__next__()
+                    temp_batch = batch_list[1]
+                    overlaid_rgb, gt_rgb = temp_batch
+                    overlaid_rgb = overlaid_rgb.to(map_location)
+                    gt_rgb = gt_rgb.to(map_location)
+                    if overlaid_rgb.shape[0] != args.batch:
+                        print(f'Data batch wrong---{real_img.shape[0]}, continue...')
+                        continue
+                else:
+                    batch_list = train_iter.__next__()
+                    temp_batch = batch_list[1]
+                    ref_rgb, overlaid_rgb, gt_rgb, mask = temp_batch
+                    ref_rgb = ref_rgb.to(map_location)
+                    overlaid_rgb = overlaid_rgb.to(map_location)
+                    gt_rgb = gt_rgb.to(map_location)
+                    if overlaid_rgb.shape[0] != args.batch:
+                        print(f'Data batch wrong---{real_img.shape[0]}, continue...')
+                        continue
             else:
                 batch_list = train_iter.__next__()
                 temp_batch = batch_list[1]
-                ref_rgb, ref_gray, gt_rgb, gt_gray, left_gt, left_raw, right_gt, right_raw, mouth_gt, mouth_raw, mask = temp_batch
+                _, ref_rgb, ref_gray, gt_rgb, gt_gray, left_gt, left_raw, right_gt, right_raw, mouth_gt, mouth_raw, mask = temp_batch
                 ref_rgb = ref_rgb.to(map_location)
                 ref_gray = ref_gray.to(map_location)
                 gt_rgb = gt_rgb.to(map_location)
@@ -845,67 +868,49 @@ def ddp_main(rank, world_size, args):
 
         if args.is_ae:
             if args.is_global:
-                if i >= args.ae_switch_iter: # MAE+AD training
+                # MAE+AD training
+                if args.is_temp:
+                    global_rgb_input = [overlaid_rgb, gt_rgb]
+                else:
                     global_rgb_input = [overlaid_rgb, ref_rgb, gt_rgb]
-                    global_rgb_fake, global_rgb_feature, global_rgb_rec_loss, global_rgb_perceptual_loss, global_adv_loss = model(global_rgb_input, 'global_rgb_ae_ad')
-                    global_input = overlaid_rgb
-                    global_fake = global_rgb_fake
-                    global_feature = global_rgb_feature
-                    global_rec_loss = global_rgb_rec_loss
-                    global_perceptual_loss = global_rgb_perceptual_loss
-                    global_gt = gt_rgb
-                    
-                    global_rgb_ae_optim.zero_grad()
-                    global_rgb_loss = (global_rec_loss*args.lambda_x_rec_loss + 
-                                        global_perceptual_loss*args.lambda_perceptual_loss + 
-                                        global_adv_loss*args.lambda_adv_loss)
+                global_rgb_fake, global_rgb_feature, global_rgb_rec_loss, global_rgb_perceptual_loss, global_adv_loss = model(global_rgb_input, 'global_rgb_ae_ad')
+                global_input = overlaid_rgb
+                global_fake = global_rgb_fake
+                global_feature = global_rgb_feature
+                global_rec_loss = global_rgb_rec_loss
+                global_perceptual_loss = global_rgb_perceptual_loss
+                global_gt = gt_rgb
+                
+                global_rgb_ae_optim.zero_grad()
+                global_rgb_loss = (global_rec_loss*args.lambda_x_rec_loss + 
+                                    global_perceptual_loss*args.lambda_perceptual_loss + 
+                                    global_adv_loss*args.lambda_adv_loss)
 
-                    global_rgb_loss.backward()
-                    gather_grad(
-                        global_module.parameters(), world_size
-                    )
-                    global_rgb_ae_optim.step()
+                global_rgb_loss.backward()
+                gather_grad(
+                    global_module.parameters(), world_size
+                )
+                global_rgb_ae_optim.step()
 
-                    # ae_D adv
-                    requires_grad(model.module.ae_discriminator, True)
-                    ae_d_loss, real_score, fake_score = model(global_rgb_input, "ae_D")
-                    ae_d_loss = ae_d_loss.mean()
+                # ae_D adv
+                requires_grad(model.module.ae_discriminator, True)
+                ae_d_loss, real_score, fake_score = model(global_rgb_input, "ae_D")
+                ae_d_loss = ae_d_loss.mean()
+                ae_d_optim.zero_grad()
+                ae_d_loss.backward()
+                ae_d_optim.step()
+                real_score_val = real_score.item()
+                fake_score_val = fake_score.item()
+
+                d_regularize = i % args.d_reg_every == 0
+                if d_regularize:
+                    d_reg_loss, r1_loss = model(global_rgb_input, 'ae_D_reg')
+                    d_reg_loss = d_reg_loss.mean()
+                    d_reg_loss_val = d_reg_loss.item()
                     ae_d_optim.zero_grad()
-                    ae_d_loss.backward()
+                    d_reg_loss.backward()
                     ae_d_optim.step()
-                    real_score_val = real_score.item()
-                    fake_score_val = fake_score.item()
-
-                    d_regularize = i % args.d_reg_every == 0
-                    if d_regularize:
-                        d_reg_loss, r1_loss = model(global_rgb_input, 'ae_D_reg')
-                        d_reg_loss = d_reg_loss.mean()
-                        d_reg_loss_val = d_reg_loss.item()
-                        ae_d_optim.zero_grad()
-                        d_reg_loss.backward()
-                        ae_d_optim.step()
-                        r1_val = r1_loss.mean().item()
-                else: # MSE-only training
-                    global_rgb_input = [overlaid_rgb, ref_rgb, gt_rgb]
-                    global_rgb_fake, global_rgb_feature, global_rgb_rec_loss, global_rgb_perceptual_loss = model(global_rgb_input, 'global_rgb_ae')
-                    global_input = overlaid_rgb
-                    global_fake = global_rgb_fake
-                    global_feature = global_rgb_feature
-                    global_rec_loss = global_rgb_rec_loss
-                    global_perceptual_loss = global_rgb_perceptual_loss
-                    global_gt = gt_rgb
-
-                    global_rgb_ae_optim.zero_grad()
-                    global_rgb_loss = (global_rec_loss*args.lambda_x_rec_loss + 
-                                        global_perceptual_loss*args.lambda_perceptual_loss)
-
-                    global_rgb_loss.backward()
-                    global_rgb_ae_optim.step()
-                    
-                    global_adv_loss = 0
-                    ae_d_loss = 0
-                    real_score_val = 0
-                    fake_score_val = 0
+                    r1_val = r1_loss.mean().item()
 
                 # print('Writing losses to tensorboard...')
                 writer.add_scalar('train/global_rec_loss', global_rec_loss, i)
@@ -929,25 +934,6 @@ def ddp_main(rank, world_size, args):
                     vis_global_gt = tensor2image(temp_global_gt)
                     vis_global_gt = (vis_global_gt+1)/2.
 
-                    # temp_pred_edge = pred_edge.detach()
-                    # vis_temp_pred_edge = tensor2image(temp_pred_edge)
-                    # # Normalize to [0, 1]
-                    # pred_edge_max = np.max(vis_temp_pred_edge)
-                    # pred_edge_min = np.min(vis_temp_pred_edge)
-                    # pred_edge_range = pred_edge_max - pred_edge_min
-                    # vis_temp_pred_edge -= pred_edge_min
-                    # vis_temp_pred_edge /= pred_edge_range
-
-                    # temp_gt_edge = gt_edge.detach()
-                    # vis_temp_gt_edge = tensor2image(temp_gt_edge)
-                    # # Normalize to [0, 1]
-                    # gt_edge_max = np.max(vis_temp_gt_edge)
-                    # gt_edge_min = np.min(vis_temp_gt_edge)
-                    # gt_edge_range = gt_edge_max - gt_edge_min
-                    # vis_temp_gt_edge -= gt_edge_min
-                    # vis_temp_gt_edge /= gt_edge_range
-
-                    # print('Writing images to tensorboard')
                     nrow = 1
                     ncol = 3
                     fig = plt.figure(figsize=(10, 10))
@@ -957,38 +943,21 @@ def ddp_main(rank, world_size, args):
                                                     left=0.5/(ncol+1), right=1-0.5/(ncol+1))
                     ax1 = plt.subplot(gs[0, 0])
                     ax1.imshow(vis_global_input)
-                    # ax1.title.set_text('Real Image')
                     ax1.set_xticklabels([])
                     ax1.set_yticklabels([])
                     ax1.axis('off')
 
                     ax2 = plt.subplot(gs[0, 1])
                     ax2.imshow(vis_global_fake)
-                    # ax2.title.set_text('Fake Image')
                     ax2.set_xticklabels([])
                     ax2.set_yticklabels([])
                     ax2.axis('off')
 
                     ax3 = plt.subplot(gs[0, 2])
                     ax3.imshow(vis_global_gt)
-                    # ax2.title.set_text('Fake Image')
                     ax3.set_xticklabels([])
                     ax3.set_yticklabels([])
                     ax3.axis('off')
-
-                    # ax4 = plt.subplot(gs[1, 0])
-                    # ax4.imshow(vis_temp_pred_edge)
-                    # # ax2.title.set_text('Fake Image')
-                    # ax4.set_xticklabels([])
-                    # ax4.set_yticklabels([])
-                    # ax4.axis('off')
-
-                    # ax5 = plt.subplot(gs[1, 1])
-                    # ax5.imshow(vis_temp_gt_edge)
-                    # # ax2.title.set_text('Fake Image')
-                    # ax5.set_xticklabels([])
-                    # ax5.set_yticklabels([])
-                    # ax5.axis('off')
 
                     writer.add_figure('train_figs'+str(i), fig)
                 if (i+1)%args.save_network_interval == 0:
@@ -997,334 +966,185 @@ def ddp_main(rank, world_size, args):
                         "global_rgb_ae": model.module.global_rgb_ae.state_dict(),
                         "ae_discriminator": model.module.ae_discriminator.state_dict(),
                         "global_ema": model.module.global_ema.state_dict(),
-                        "global_rgb_ae_optim": global_rgb_ae_optim,
-                        "ae_d_optim": ae_d_optim,
+                        "global_rgb_ae_optim": global_rgb_ae_optim.state_dict(),
+                        "ae_d_optim": ae_d_optim.state_dict(),
                         "train_args": args,
                         "cfg": cfg,
                     },
                     f"{save_dir}/checkpoints/{args.suffix}/{str(i).zfill(6)}.pt",
                 )
             else: # Local based method 
-                is_detach = args.is_detach
-
-                left_model_input = [left_raw, left_gt]
-                left_fake, left_feature, left_rec_loss, left_perceptual_loss = model(left_model_input, 'left')
-                if is_detach:
+                if args.is_local_training: # Train local models
+                    left_model_input = [left_raw, left_gt]
+                    left_fake, left_feature, left_rec_loss, left_perceptual_loss = model(left_model_input, 'left')
                     local_left_optim.zero_grad()
                     left_local_loss = (left_rec_loss*args.lambda_x_rec_loss+
                                         left_perceptual_loss*args.lambda_perceptual_loss)            
                     left_local_loss.backward()
                     local_left_optim.step()
 
-                right_model_input = [right_raw, right_gt]
-                right_fake, right_feature, right_rec_loss, right_perceptual_loss = model(right_model_input, 'right')
-                if is_detach:
+                    right_model_input = [right_raw, right_gt]
+                    right_fake, right_feature, right_rec_loss, right_perceptual_loss = model(right_model_input, 'right')
                     local_right_optim.zero_grad()
                     right_local_loss = (right_rec_loss*args.lambda_x_rec_loss+
                                         right_perceptual_loss*args.lambda_perceptual_loss)
                     right_local_loss.backward()
                     local_right_optim.step()
 
-                mouth_model_input = [mouth_raw, mouth_gt]
-                mouth_fake, mouth_feature, mouth_rec_loss, mouth_perceptual_loss = model(mouth_model_input, 'mouth')
-                if is_detach:
+                    mouth_model_input = [mouth_raw, mouth_gt]
+                    mouth_fake, mouth_feature, mouth_rec_loss, mouth_perceptual_loss = model(mouth_model_input, 'mouth')
                     local_mouth_optim.zero_grad()
                     mouth_local_loss = (mouth_rec_loss*args.lambda_x_rec_loss+
                                         mouth_perceptual_loss*args.lambda_perceptual_loss)
                     mouth_local_loss.backward()
                     local_mouth_optim.step()
-                
-                if is_detach:
-                    temp_left_fake = left_fake.detach()
-                    temp_right_fake = right_fake.detach()
-                    temp_mouth_fake = mouth_fake.detach()
-                else:
-                    temp_left_fake = left_fake
-                    temp_right_fake = right_fake
-                    temp_mouth_fake = mouth_fake
+                else: # Use trained local models to generate new data
+                    with torch.no_grad():
+                        left_fake, _ = model.module.local_pathway_left_eye(left_raw)
+                        right_fake, _ = model.module.local_pathway_right_eye(right_raw)
+                        mouth_fake, _ = model.module.local_pathway_mouth(mouth_raw)
 
-                local_fuser_input = [temp_left_fake, temp_right_fake, temp_mouth_fake, mask, ref_gray]
-                local_fused = model(local_fuser_input, 'local_fusion')
-                    
-                # Global prediction
-                global_ae_input = [local_fused, ref_gray, ref_rgb, gt_gray, gt_rgb]
-                global_fake, global_feature, global_rec_loss, global_perceptual_loss, global_adv_loss, global_edge_loss, global_pred_edge, global_gt_edge = model(global_ae_input, 'global_ae_ad')
-                
-                global_input = local_fused # gray
-                if args.is_gray:
-                    global_gt = gt_gray
-                else:
-                    global_gt = gt_rgb
-                
-                if not is_detach:
-                    local_left_optim.zero_grad()
-                    local_right_optim.zero_grad()
-                    local_mouth_optim.zero_grad()
+                    local_fuser_input = [left_fake, right_fake, mouth_fake, mask, gt_rgb]
+                    # Generate new data and save them
+                    model(local_fuser_input, 'local_fusion_1')
 
-                global_ae_optim.zero_grad()
+                    # Stop when one epoch is finished
+                    if (i+1) % (len(train_dataset) // args.batch) == 0:
+                        print('New data is generated')
+                        break
+                # Only log to tensorboard when training
+                if args.is_local_training: 
+                    if is_tensorboard:
+                        # Left gray image
+                        temp_left_gray = left_raw.detach()
+                        vis_left_gray = tensor2image(temp_left_gray)
+                        vis_left_gray = (vis_left_gray+1)/2.
 
-                if global_edge_loss is not None:
-                    global_loss = (global_rec_loss*args.lambda_x_rec_loss + 
-                                        global_perceptual_loss*args.lambda_perceptual_loss + 
-                                        global_adv_loss*args.lambda_adv_loss + global_edge_loss)
-                else:
-                    global_loss = (global_rec_loss*args.lambda_x_rec_loss + 
-                                        global_perceptual_loss*args.lambda_perceptual_loss + 
-                                        global_adv_loss*args.lambda_adv_loss)
+                        # Left gt image
+                        temp_left_gt = left_gt.detach()
+                        vis_left_gt = tensor2image(temp_left_gt)
+                        vis_left_gt = (vis_left_gt+1)/2.
 
-                global_loss.backward()
+                        # Left fake image
+                        temp_left_fake = left_fake.detach()
+                        vis_left_fake = tensor2image(temp_left_fake)
+                        vis_left_fake = (vis_left_fake+1)/2.
 
-                gather_grad(
-                    global_module.parameters(), world_size
-                )
-                
-                if not is_detach:
-                    local_left_optim.step()
-                    local_right_optim.step()
-                    local_mouth_optim.step()
+                        # Right gray image
+                        temp_right_gray = right_raw.detach()
+                        vis_right_gray = tensor2image(temp_right_gray)
+                        vis_right_gray = (vis_right_gray+1)/2.
 
-                global_ae_optim.step()
-                
-                # ae_D adv
-                requires_grad(model.module.ae_discriminator, True)
-                ae_d_loss, real_score, fake_score = model(global_ae_input, "ae_D_1")
-                ae_d_loss = ae_d_loss.mean()
-                ae_d_optim.zero_grad()
-                ae_d_loss.backward()
-                ae_d_optim.step()
-                real_score_val = real_score.item()
-                fake_score_val = fake_score.item()
+                        # Right gt image
+                        temp_right_gt = right_gt.detach()
+                        vis_right_gt = tensor2image(temp_right_gt)
+                        vis_right_gt = (vis_right_gt+1)/2.
+                        
+                        # Right fake image
+                        temp_right_fake = right_fake.detach()
+                        vis_right_fake = tensor2image(temp_right_fake)
+                        vis_right_fake = (vis_right_fake+1)/2.
 
-                d_regularize = i % args.d_reg_every == 0
-                if d_regularize:
-                    d_reg_loss, r1_loss = model(global_ae_input, 'ae_D_reg_1')
-                    d_reg_loss = d_reg_loss.mean()
-                    d_reg_loss_val = d_reg_loss.item()
-                    ae_d_optim.zero_grad()
-                    d_reg_loss.backward()
-                    ae_d_optim.step()
-                    r1_val = r1_loss.mean().item()
-                
-                # Set the D for next iteration
-                requires_grad(model.module.ae_discriminator, False)
+                        # Mouth gray image
+                        temp_mouth_gray = mouth_raw.detach()
+                        vis_mouth_gray = tensor2image(temp_mouth_gray)
+                        vis_mouth_gray = (vis_mouth_gray+1)/2.
+                        
+                        # Mouth gt image
+                        temp_mouth_gt = mouth_gt.detach()
+                        vis_mouth_gt = tensor2image(temp_mouth_gt)
+                        vis_mouth_gt = (vis_mouth_gt+1)/2.
 
-                if is_tensorboard:
-                    # Left gray image
-                    temp_left_gray = left_raw.detach()
-                    vis_left_gray = tensor2image(temp_left_gray)
-                    vis_left_gray = (vis_left_gray+1)/2.
+                        # Mouth fake image
+                        temp_mouth_fake = mouth_fake.detach()
+                        vis_mouth_fake = tensor2image(temp_mouth_fake)
+                        vis_mouth_fake = (vis_mouth_fake+1)/2.
 
-                    # Left gt image
-                    temp_left_gt = left_gt.detach()
-                    vis_left_gt = tensor2image(temp_left_gt)
-                    vis_left_gt = (vis_left_gt+1)/2.
+                        writer.add_scalar('train/left_rec_loss', left_rec_loss, i)
+                        writer.add_scalar('train/left_percept_loss', left_perceptual_loss, i)
+                        writer.add_scalar('train/right_rec_loss', right_rec_loss, i)
+                        writer.add_scalar('train/right_percept_loss', right_perceptual_loss, i)
+                        writer.add_scalar('train/mouth_rec_loss', mouth_rec_loss, i)
+                        writer.add_scalar('train/mouth_percept_loss', mouth_perceptual_loss, i)
 
-                    # Left fake image
-                    temp_left_fake = left_fake.detach()
-                    vis_left_fake = tensor2image(temp_left_fake)
-                    vis_left_fake = (vis_left_fake+1)/2.
+                        log_imgs_every = 20
+                        if i%log_imgs_every == 0:
+                            nrow = 3
+                            ncol = 3
+                            fig = plt.figure(figsize=(10, 10))
+                            gs = gridspec.GridSpec(nrow, ncol,
+                                                            wspace=0.1, hspace=0.0, 
+                                                            top=1.-0.5/(nrow+1), bottom=0.5/(nrow+1), 
+                                                            left=0.5/(ncol+1), right=1-0.5/(ncol+1))
+                            ax1 = plt.subplot(gs[0, 0])
+                            ax1.imshow(vis_left_gray)
+                            ax1.set_xticklabels([])
+                            ax1.set_yticklabels([])
+                            ax1.axis('off')
 
-                    # Right gray image
-                    temp_right_gray = right_raw.detach()
-                    vis_right_gray = tensor2image(temp_right_gray)
-                    vis_right_gray = (vis_right_gray+1)/2.
+                            ax2 = plt.subplot(gs[0, 1])
+                            ax2.imshow(vis_right_gray)
+                            ax2.set_xticklabels([])
+                            ax2.set_yticklabels([])
+                            ax2.axis('off')
 
-                    # Right gt image
-                    temp_right_gt = right_gt.detach()
-                    vis_right_gt = tensor2image(temp_right_gt)
-                    vis_right_gt = (vis_right_gt+1)/2.
-                    
-                    # Right fake image
-                    temp_right_fake = right_fake.detach()
-                    vis_right_fake = tensor2image(temp_right_fake)
-                    vis_right_fake = (vis_right_fake+1)/2.
+                            ax3 = plt.subplot(gs[0, 2])
+                            ax3.imshow(vis_mouth_gray)
+                            ax3.set_xticklabels([])
+                            ax3.set_yticklabels([])
+                            ax3.axis('off')
 
-                    # Mouth gray image
-                    temp_mouth_gray = mouth_raw.detach()
-                    vis_mouth_gray = tensor2image(temp_mouth_gray)
-                    vis_mouth_gray = (vis_mouth_gray+1)/2.
-                    
-                    # Mouth gt image
-                    temp_mouth_gt = mouth_gt.detach()
-                    vis_mouth_gt = tensor2image(temp_mouth_gt)
-                    vis_mouth_gt = (vis_mouth_gt+1)/2.
+                            ax4 = plt.subplot(gs[1, 0])
+                            ax4.imshow(vis_left_fake)
+                            ax4.set_xticklabels([])
+                            ax4.set_yticklabels([])
+                            ax4.axis('off')
 
-                    # Mouth fake image
-                    temp_mouth_fake = mouth_fake.detach()
-                    vis_mouth_fake = tensor2image(temp_mouth_fake)
-                    vis_mouth_fake = (vis_mouth_fake+1)/2.
+                            ax5 = plt.subplot(gs[1, 1])
+                            ax5.imshow(vis_right_fake)
+                            ax5.set_xticklabels([])
+                            ax5.set_yticklabels([])
+                            ax5.axis('off')
 
-                    if args.is_single_channel: # Return the local concatenation
-                        temp_global_input = global_input.detach()
-                        vis_global_input = tensor2image(temp_global_input)
-                        vis_global_input = (vis_global_input+1)/2.
-                    else: # Return the ref img
-                        temp_global_input = ref_gray.detach()
-                        vis_global_input = tensor2image(temp_global_input)
-                        vis_global_input = (vis_global_input+1)/2.
+                            ax6 = plt.subplot(gs[1, 2])
+                            ax6.imshow(vis_mouth_fake)
+                            ax6.set_xticklabels([])
+                            ax6.set_yticklabels([])
+                            ax6.axis('off')
 
-                    temp_global_fake = global_fake.detach()
-                    vis_global_fake = tensor2image(temp_global_fake)
-                    vis_global_fake = (vis_global_fake+1)/2.
+                            ax7 = plt.subplot(gs[2, 0])
+                            ax7.imshow(vis_left_gt)
+                            ax7.set_xticklabels([])
+                            ax7.set_yticklabels([])
+                            ax7.axis('off')
 
-                    temp_global_gt = global_gt.detach()
-                    vis_global_gt = tensor2image(temp_global_gt)
-                    vis_global_gt = (vis_global_gt+1)/2.
+                            ax8 = plt.subplot(gs[2, 1])
+                            ax8.imshow(vis_right_gt)
+                            ax8.set_xticklabels([])
+                            ax8.set_yticklabels([])
+                            ax8.axis('off')
 
-                    if global_pred_edge is not None:
-                        temp_global_pred_edge = global_pred_edge.detach()
-                        vis_global_pred_edge = tensor2image(temp_global_pred_edge)
-                    else:
-                        vis_global_pred_edge = None
-
-                    if global_gt_edge is not None:
-                        vis_global_gt_edge = tensor2image(global_gt_edge)
-                    else:
-                        vis_global_gt_edge = None
-
-                    writer.add_scalar('train/left_rec_loss', left_rec_loss, i)
-                    writer.add_scalar('train/left_percept_loss', left_perceptual_loss, i)
-                    writer.add_scalar('train/right_rec_loss', right_rec_loss, i)
-                    writer.add_scalar('train/right_percept_loss', right_perceptual_loss, i)
-                    writer.add_scalar('train/mouth_rec_loss', mouth_rec_loss, i)
-                    writer.add_scalar('train/mouth_percept_loss', mouth_perceptual_loss, i)
-
-                    writer.add_scalar('train/global_rec_loss', global_rec_loss, i)
-                    writer.add_scalar('train/global_percept_loss', global_perceptual_loss, i)
-                    writer.add_scalar('train/global_adv_loss', global_adv_loss, i)
-                    writer.add_scalar('train/ae_d_loss', ae_d_loss, i)
-                    writer.add_scalar('train/real_score', real_score_val, i)
-                    writer.add_scalar('train/fake_score', fake_score_val, i)
-                    
-                    if global_edge_loss is not None:
-                        writer.add_scalar('train/edge_loss', global_edge_loss, i)
-
-                    log_imgs_every = 20
-                    if i%log_imgs_every == 0:
-                        nrow = 3
-                        ncol = 5
-                        fig = plt.figure(figsize=(10, 10))
-                        gs = gridspec.GridSpec(nrow, ncol,
-                                                        wspace=0.1, hspace=0.0, 
-                                                        top=1.-0.5/(nrow+1), bottom=0.5/(nrow+1), 
-                                                        left=0.5/(ncol+1), right=1-0.5/(ncol+1))
-                        ax1 = plt.subplot(gs[0, 0])
-                        ax1.imshow(vis_left_gray)
-                        # ax1.title.set_text('Real Image')
-                        ax1.set_xticklabels([])
-                        ax1.set_yticklabels([])
-                        ax1.axis('off')
-
-                        ax2 = plt.subplot(gs[0, 1])
-                        ax2.imshow(vis_right_gray)
-                        # ax2.title.set_text('Fake Image')
-                        ax2.set_xticklabels([])
-                        ax2.set_yticklabels([])
-                        ax2.axis('off')
-
-                        ax3 = plt.subplot(gs[0, 2])
-                        ax3.imshow(vis_mouth_gray)
-                        # ax3.title.set_text('Fake Image')
-                        ax3.set_xticklabels([])
-                        ax3.set_yticklabels([])
-                        ax3.axis('off')
-
-                        if vis_global_input is not None:
-                            ax10 = plt.subplot(gs[0, 3])
-                            ax10.imshow(vis_global_input)
-                            ax10.set_xticklabels([])
-                            ax10.set_yticklabels([])
-                            ax10.axis('off')
-
-                        ax4 = plt.subplot(gs[1, 0])
-                        ax4.imshow(vis_left_fake)
-                        # ax2.title.set_text('Fake Image')
-                        ax4.set_xticklabels([])
-                        ax4.set_yticklabels([])
-                        ax4.axis('off')
-
-                        ax5 = plt.subplot(gs[1, 1])
-                        ax5.imshow(vis_right_fake)
-                        # ax2.title.set_text('Fake Image')
-                        ax5.set_xticklabels([])
-                        ax5.set_yticklabels([])
-                        ax5.axis('off')
-
-                        ax6 = plt.subplot(gs[1, 2])
-                        ax6.imshow(vis_mouth_fake)
-                        # ax2.title.set_text('Fake Image')
-                        ax6.set_xticklabels([])
-                        ax6.set_yticklabels([])
-                        ax6.axis('off')
-
-                        ax11 = plt.subplot(gs[1, 3])
-                        ax11.imshow(vis_global_fake)
-                        ax11.set_xticklabels([])
-                        ax11.set_yticklabels([])
-                        ax11.axis('off')
-
-                        if vis_global_pred_edge is not None:
-                            ax13 = plt.subplot(gs[1, 4])
-                            ax13.imshow(vis_global_pred_edge)
-                            ax13.set_xticklabels([])
-                            ax13.set_yticklabels([])
-                            ax13.axis('off')
-
-                        ax7 = plt.subplot(gs[2, 0])
-                        ax7.imshow(vis_left_gt)
-                        # ax7.title.set_text('Fake Image')
-                        ax7.set_xticklabels([])
-                        ax7.set_yticklabels([])
-                        ax7.axis('off')
-
-                        ax8 = plt.subplot(gs[2, 1])
-                        ax8.imshow(vis_right_gt)
-                        # ax8.title.set_text('Fake Image')
-                        ax8.set_xticklabels([])
-                        ax8.set_yticklabels([])
-                        ax8.axis('off')
-
-                        ax9 = plt.subplot(gs[2, 2])
-                        ax9.imshow(vis_mouth_gt)
-                        # ax2.title.set_text('Fake Image')
-                        ax9.set_xticklabels([])
-                        ax9.set_yticklabels([])
-                        ax9.axis('off')
-
-                        ax12 = plt.subplot(gs[2, 3])
-                        ax12.imshow(vis_global_gt)
-                        ax12.set_xticklabels([])
-                        ax12.set_yticklabels([])
-                        ax12.axis('off')
-
-                        if vis_global_gt_edge is not None:
-                            ax14 = plt.subplot(gs[2, 4])
-                            ax14.imshow(vis_global_gt_edge)
-                            ax14.set_xticklabels([])
-                            ax14.set_yticklabels([])
-                            ax14.axis('off')
-
-                        writer.add_figure('train_figs'+str(i), fig)
-                
-                if (i+1)%args.save_network_interval == 0:
-                    torch.save(
-                        {
-                            "local_pathway_left_eye": model.module.local_pathway_left_eye.state_dict(),
-                            "local_pathway_right_eye": model.module.local_pathway_right_eye.state_dict(),
-                            "local_pathway_mouth": model.module.local_pathway_mouth.state_dict(),
-                            "global_ae": model.module.global_ae.state_dict(),
-                            "ae_discriminator": model.module.ae_discriminator.state_dict(),
-                            "global_ema": model.module.global_ema.state_dict(),
-                            "local_left_optim": local_left_optim.state_dict(),
-                            "local_right_optim": local_right_optim.state_dict(),
-                            "local_mouth_optim": local_mouth_optim.state_dict(),
-                            "global_ae_optim": global_ae_optim.state_dict(),
-                            "ae_d_optim": ae_d_optim.state_dict(),
-                            "train_args": args,
-                            "cfg": cfg,
-                        },
-                        f"{save_dir}/checkpoints/{args.suffix}/{str(i).zfill(6)}.pt",
-                    )
+                            ax9 = plt.subplot(gs[2, 2])
+                            ax9.imshow(vis_mouth_gt)
+                            ax9.set_xticklabels([])
+                            ax9.set_yticklabels([])
+                            ax9.axis('off')
+                            writer.add_figure('train_figs'+str(i), fig)
+                if args.is_local_training:
+                    if (i+1)%args.save_network_interval == 0:
+                        torch.save(
+                            {
+                                "local_pathway_left_eye": model.module.local_pathway_left_eye.state_dict(),
+                                "local_pathway_right_eye": model.module.local_pathway_right_eye.state_dict(),
+                                "local_pathway_mouth": model.module.local_pathway_mouth.state_dict(),
+                                "local_left_optim": local_left_optim.state_dict(),
+                                "local_right_optim": local_right_optim.state_dict(),
+                                "local_mouth_optim": local_mouth_optim.state_dict(),
+                                "train_args": args,
+                                "cfg": cfg,
+                            },
+                            f"{save_dir}/checkpoints/{args.suffix}/{str(i).zfill(6)}.pt",
+                        )
         else:
             # Here stylecode is from noise z; fake_stylecode is from encoder
             # adv_loss, w_rec_loss, stylecode, fake_stylecode, fake_img = model(None, "G")
@@ -1368,6 +1188,7 @@ def ddp_main(rank, world_size, args):
                 latent_spatial_std = stylecode.std(dim=(2, 3)).mean().item()
 
             g_loss = adv_loss * args.gan_lambda_adv_loss
+
             g_loss_val = g_loss.item()
             adv_loss_val = adv_loss.item()
 
@@ -1593,10 +1414,11 @@ if __name__ == "__main__":
     parser.add_argument("--train_lmdb", type=str)
     parser.add_argument("--val_lmdb", type=str)
     parser.add_argument("--ckpt", type=str)
+    parser.add_argument("--ckpt_local", type=str)
     parser.add_argument("--suffix", type=str)
-    parser.add_argument("--tensorboard_logdir", type=str, default='/home/uss00067/Experiments/StyleMapGAN/logs/')
+    parser.add_argument("--tensorboard_logdir", type=str, default='/nfs/STG/Audio2FacePose/MEAD/Experiments/StyleMapGAN/logs/')
     parser.add_argument("--list_path", type=str)
-
+    parser.add_argument("--expr", type=str, default="/nfs/STG/Audio2FacePose/MEAD/Experiments/StyleMapGAN/expr")
     parser.add_argument(
         "--dataset",
         type=str,
@@ -1621,6 +1443,9 @@ if __name__ == "__main__":
     parser.add_argument("--is_single_channel", action="store_true") # Only for local method
     parser.add_argument("--is_detach", action="store_true") # Only for local method
     parser.add_argument("--is_equal", action="store_true") # Only for global method (global and GAN)
+    parser.add_argument("--local_parent_path", type=str, default="/nfs/STG/Audio2FacePose/MEAD/temp_FDC")
+    parser.add_argument("--is_local_training", action="store_true") # Only for local method
+    parser.add_argument("--is_temp", action="store_true") # Only for global method
 
     parser.add_argument("--batch", type=int, default=8, help="total batch sizes")
     parser.add_argument("--size", type=int, choices=[128, 256, 512, 1024], default=256)
@@ -1668,32 +1493,27 @@ if __name__ == "__main__":
     print("{} batch per gpu!".format(input_args.batch_per_gpu))
 
     # Uncomment below to set is_ae as True
-    # input_args.is_ae = not input_args.is_ae
+    input_args.is_ae = not input_args.is_ae
 
     # Uncomment below to set is_global as True
-    input_args.is_global = not input_args.is_global # True for global method and gan method (when reading data)
-        
-    # Uncomment below to set is_gray as True for local method
-    # input_args.is_gray = not input_args.is_gray # True only for local method
+    input_args.is_global = not input_args.is_global
+    
+    # Uncomment below to set is_local_training as True
+    # input_args.is_local_training = not input_args.is_local_training
 
     # Uncomment below to set has_edge as True
     # input_args.has_edge = not input_args.has_edge
-    
-    # Uncomment below to set is_single_channel as True
-    # input_args.is_single_channel = not input_args.is_single_channel # True only for local method
-
-    # Uncomment below to set is_detach as True
-    # input_args.is_detach = not input_args.is_detach
 
     # Uncomment below to set is_equal as True
-    input_args.is_equal = not input_args.is_equal # False for local method
+    input_args.is_equal = not input_args.is_equal 
+
+    # Uncomment below to set is_temp as True
+    # input_args.is_temp = not input_args.is_temp 
 
     print('is_ae: ', input_args.is_ae)
     print('is_global: ', input_args.is_global)
-    print('is_gray: ', input_args.is_gray)
-    print('has_edge: ', input_args.has_edge)
-    print('is_single_channel: ', input_args.is_single_channel)
-    print('is_detach: ', input_args.is_detach)
+    print('is_local_training: ', input_args.is_local_training)
     print('is_equal: ', input_args.is_equal)
+    print('is_temp: ', input_args.is_temp)
 
     run(ddp_main, ngpus, input_args)
